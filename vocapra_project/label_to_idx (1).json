@@ -1,0 +1,10 @@
+{
+  "feed_distribution": 0,
+  "heat": 1,
+  "injury_death": 2,
+  "mother_kid_reunion": 3,
+  "mother_kid_separation": 4,
+  "parturition": 5,
+  "visitor": 6,
+  "social_isolation": 7
+}
