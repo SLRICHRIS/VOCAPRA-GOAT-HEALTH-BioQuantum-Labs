@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
 """
-VOCAPRA Streamlit App – Elite UI
-
-World-class UI for:
-- Uploading a WAV file
-- Running VOCAPRA MFCC (+Δ +Δ²) pipeline
-- Predicting with a tiny Conv1D model (best_model*.h5)
-- Visualising class probabilities
-- Viewing Grad-CAM-like saliency over the feature map
-
-Expected artifacts (any of these patterns is accepted):
-  vocapra_project/best_model*.h5
-  vocapra_project/label_to_idx*.json
+VOCAPRA Streamlit App – Elite UI v2 (Glassmorphism Edition)
 """
 
 from __future__ import annotations
@@ -28,68 +17,35 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 
 # =============================================================================
-# CONFIG (must match training pipeline)
+# CONFIG
 # =============================================================================
 SR = 16000
 N_MFCC = 13
 WIN_LEN = 0.025
 HOP_LEN = 0.010
 TARGET_FRAMES = 80
-
 ARTIFACT_DIR = Path("vocapra_project")
 
 # =============================================================================
-# SMALL UTILS
+# UTILS & PIPELINE (Logic remains the same)
 # =============================================================================
-
-
 def resolve_artifact(pattern: str) -> Optional[Path]:
-    """
-    Return the first file in ARTIFACT_DIR that matches `pattern`,
-    e.g. "best_model*.h5" or "label_to_idx*.json".
-    """
     if not ARTIFACT_DIR.exists():
         return None
     matches: List[Path] = sorted(ARTIFACT_DIR.glob(pattern))
     return matches[0] if matches else None
 
-
-# =============================================================================
-# FEATURE PIPELINE
-# =============================================================================
-def compute_mfcc_with_deltas(
-    y: np.ndarray,
-    sr: int = SR,
-    n_mfcc: int = N_MFCC,
-    win_len: float = WIN_LEN,
-    hop_len: float = HOP_LEN,
-) -> np.ndarray:
-    """
-    Compute MFCC + Δ + Δ² features.
-
-    Returns:
-        feats: np.ndarray of shape (T, 3 * n_mfcc)
-    """
-    n_fft = int(win_len * sr)
-    hop_length = int(hop_len * sr)
-
-    mf = librosa.feature.mfcc(
-        y=y, sr=sr, n_mfcc=n_mfcc, n_fft=n_fft, hop_length=hop_length
-    )  # (n_mfcc, T)
-    mf = mf.T  # (T, n_mfcc)
-
+def compute_mfcc_with_deltas(y: np.ndarray, sr: int = SR) -> np.ndarray:
+    n_fft = int(WIN_LEN * sr)
+    hop_length = int(HOP_LEN * sr)
+    mf = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=N_MFCC, n_fft=n_fft, hop_length=hop_length)
+    mf = mf.T
     d1 = librosa.feature.delta(mf.T).T
     d2 = librosa.feature.delta(mf.T, order=2).T
-
     feats = np.concatenate([mf, d1, d2], axis=1).astype(np.float32)
     return feats
 
-
 def to_fixed_frames(seq: np.ndarray, target_frames: int = TARGET_FRAMES) -> np.ndarray:
-    """
-    Right-pad / truncate a (T, F) sequence to shape (target_frames, F),
-    exactly like the training script.
-    """
     T, F = seq.shape
     out = np.zeros((target_frames, F), dtype=np.float32)
     if T >= target_frames:
@@ -98,44 +54,24 @@ def to_fixed_frames(seq: np.ndarray, target_frames: int = TARGET_FRAMES) -> np.n
         out[-T:, :] = seq
     return out
 
-
-# =============================================================================
-# MODEL LOADING + GRAD-CAM
-# =============================================================================
 @st.cache_resource(show_spinner=False)
-def load_model_and_gradcam() -> Tuple[Optional[tf.keras.Model], Optional[tf.keras.Model], Optional[str], Optional[Path]]:
-    """
-    Load Keras model from best_model*.h5 and construct a Grad-CAM model
-    using the last Conv1D layer.
-    """
+def load_model_and_gradcam():
     model_path = resolve_artifact("best_model*.h5")
     if model_path is None:
         return None, None, None, None
-
     model = tf.keras.models.load_model(model_path)
-
-    # Find the last Conv1D layer for Grad-CAM
-    conv_layer_name: Optional[str] = None
+    conv_layer_name = None
     for layer in reversed(model.layers):
         if isinstance(layer, tf.keras.layers.Conv1D):
             conv_layer_name = layer.name
             break
-
-    grad_model: Optional[tf.keras.Model] = None
+    grad_model = None
     if conv_layer_name is not None:
-        conv_layer = model.get_layer(conv_layer_name)
-        grad_model = tf.keras.models.Model(
-            [model.inputs], [conv_layer.output, model.output]
-        )
-
+        grad_model = tf.keras.models.Model([model.inputs], [model.get_layer(conv_layer_name).output, model.output])
     return model, grad_model, conv_layer_name, model_path
 
-
 @st.cache_resource(show_spinner=False)
-def load_label_map() -> Tuple[Dict[int, str], Dict[str, int], Optional[Path]]:
-    """
-    Load label_to_idx*.json and return both idx_to_label and label_to_idx.
-    """
+def load_label_map():
     json_path = resolve_artifact("label_to_idx*.json")
     if json_path is None:
         return {}, {}, None
@@ -144,146 +80,126 @@ def load_label_map() -> Tuple[Dict[int, str], Dict[str, int], Optional[Path]]:
     idx_to_label = {int(v): k for k, v in label_to_idx.items()}
     return idx_to_label, label_to_idx, json_path
 
-
-def run_gradcam(
-    grad_model: tf.keras.Model,
-    sample: np.ndarray,
-) -> Tuple[np.ndarray, int]:
-    """
-    Compute Grad-CAM along the time axis for a single input sample
-    of shape (1, T, F).
-
-    Returns:
-        cam_resized: np.ndarray of shape (T,)
-        class_idx:   int, class index used for CAM
-    """
+def run_gradcam(grad_model, sample):
     sample_tf = tf.convert_to_tensor(sample)
-
     with tf.GradientTape() as tape:
         conv_outs, preds = grad_model(sample_tf)
         class_idx = tf.argmax(preds[0])
         loss = preds[:, class_idx]
-
-    grads = tape.gradient(loss, conv_outs)           # (1, T', C)
-    weights = tf.reduce_mean(grads, axis=1)         # (1, C)
-    cam = tf.reduce_sum(conv_outs * weights[:, tf.newaxis, :], axis=-1)  # (1, T')
-    cam = tf.nn.relu(cam).numpy()[0]                # (T',)
-
+    grads = tape.gradient(loss, conv_outs)
+    weights = tf.reduce_mean(grads, axis=1)
+    cam = tf.reduce_sum(conv_outs * weights[:, tf.newaxis, :], axis=-1)
+    cam = tf.nn.relu(cam).numpy()[0]
     cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-9)
-
     T_in = sample.shape[1]
     T_cam = cam.shape[0]
-    cam_resized = np.interp(
-        np.linspace(0, T_cam - 1, T_in), np.arange(T_cam), cam
-    )
+    cam_resized = np.interp(np.linspace(0, T_cam - 1, T_in), np.arange(T_cam), cam)
     return cam_resized, int(class_idx.numpy())
 
+# =============================================================================
+# HELPER: STYLISH PLOTTING
+# =============================================================================
+def style_axis(ax):
+    """Applies a clean, dark-mode style to matplotlib axes."""
+    ax.set_facecolor("none") # Transparent
+    ax.spines['bottom'].set_color('#cccccc')
+    ax.spines['left'].set_color('#cccccc') 
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(axis='x', colors='#cccccc')
+    ax.tick_params(axis='y', colors='#cccccc')
+    ax.yaxis.label.set_color('#cccccc')
+    ax.xaxis.label.set_color('#cccccc')
+    ax.title.set_color('#ffffff')
 
 # =============================================================================
-# STREAMLIT – WORLD-CLASS UI
+# STREAMLIT UI CONFIGURATION
 # =============================================================================
 st.set_page_config(
-    page_title="VOCAPRA Audio Event Explorer",
-    page_icon="🎧",
+    page_title="VOCAPRA Explorer",
+    page_icon="🐐",
     layout="wide",
 )
 
-# ---- Custom CSS for product-grade feel ----
+# ---- UPDATED CSS FOR GLASSMORPHISM & VIBRANCY ----
 st.markdown(
     """
     <style>
-    /* Global look */
-    html, body, [class*="css"]  {
-        font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont,
-                     "Segoe UI", sans-serif !important;
-    }
-
+    /* Background */
     .main {
-        background: radial-gradient(circle at top left, #171821 0, #020308 40%, #020308 100%);
-        color: #f4f4f4;
+        background: linear-gradient(145deg, #0f172a 0%, #1e1b4b 100%);
+        color: #f8fafc;
     }
-
-    /* Center content and give it breathing room */
-    .block-container {
-        padding-top: 2.5rem;
-        padding-bottom: 2rem;
-        max-width: 1180px;
-        margin: 0 auto;
-    }
-
-    /* Header */
-    .app-header {
-        padding: 1.4rem 1.6rem;
-        border-radius: 18px;
-        background: linear-gradient(135deg, #2c3e50 0%, #111827 60%, #0f766e 100%);
-        box-shadow: 0 18px 45px rgba(0, 0, 0, 0.45);
-        color: #ecfdf5;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 1rem;
-    }
-    .app-header-title {
-        font-size: 2.2rem;
+    
+    /* Typography */
+    h1, h2, h3 { font-family: 'Inter', sans-serif; font-weight: 700; letter-spacing: -0.02em; }
+    
+    /* Header Gradient Text */
+    .gradient-text {
+        background: linear-gradient(to right, #2dd4bf, #38bdf8);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
         font-weight: 800;
-        letter-spacing: 0.03em;
+        font-size: 2.5rem;
     }
-    .app-header-subtitle {
-        opacity: 0.82;
-        font-size: 0.95rem;
+
+    /* Glass Cards */
+    .glass-card {
+        background: rgba(255, 255, 255, 0.03);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 20px;
+        padding: 1.5rem;
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+        margin-bottom: 1rem;
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
     }
-    .tag-pill {
-        padding: 0.45rem 0.9rem;
-        border-radius: 999px;
-        border: 1px solid rgba(148, 163, 184, 0.5);
-        background: rgba(15, 23, 42, 0.75);
-        font-size: 0.78rem;
+    
+    .glass-card:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.4);
+        border: 1px solid rgba(45, 212, 191, 0.3);
+    }
+
+    /* Metric Styling */
+    .metric-value {
+        font-size: 2.2rem;
+        font-weight: 700;
+        color: #f0f9ff;
+        text-shadow: 0 0 20px rgba(56, 189, 248, 0.3);
+    }
+    
+    .metric-label {
+        font-size: 0.85rem;
         text-transform: uppercase;
-        letter-spacing: 0.12em;
+        letter-spacing: 0.1em;
+        color: #94a3b8;
     }
 
-    /* Cards */
-    .card {
-        border-radius: 18px;
-        padding: 1.1rem 1.25rem;
-        background: rgba(15,23,42,0.92);
-        border: 1px solid rgba(148, 163, 184, 0.22);
-        box-shadow: 0 18px 40px rgba(0,0,0,0.45);
-    }
-
-    .sidebar-card {
-        border-radius: 16px;
-        padding: 0.9rem 0.75rem;
-        background: rgba(15,23,42,0.96);
-        border: 1px solid rgba(148,163,184,0.25);
-        font-size: 0.84rem;
-    }
-
-    .metric-main {
-        font-size: 1.6rem !important;
-        font-weight: 700 !important;
-    }
-
-    .prob-badge {
-        display: inline-flex;
-        padding: 0.25rem 0.6rem;
-        border-radius: 999px;
+    /* Pills */
+    .status-pill {
+        display: inline-block;
+        padding: 0.3rem 0.8rem;
+        border-radius: 99px;
         font-size: 0.75rem;
-        background: rgba(34,197,94,0.12);
-        color: #bbf7d0;
-        border: 1px solid rgba(52,211,153,0.35);
-        margin-left: 0.4rem;
+        font-weight: 600;
+        background: rgba(45, 212, 191, 0.15);
+        color: #2dd4bf;
+        border: 1px solid rgba(45, 212, 191, 0.3);
     }
 
-    /* Waveform / Grad-CAM */
-    .plot-card {
-        border-radius: 18px;
-        padding: 1.0rem 1.0rem 0.6rem 1.0rem;
-        background: rgba(15,23,42,0.94);
-        border: 1px solid rgba(148,163,184,0.3);
-        box-shadow: 0 18px 40px rgba(0,0,0,0.45);
+    /* Sidebar adjustments */
+    section[data-testid="stSidebar"] {
+        background-color: #0b0f19;
     }
-
+    
+    /* File Uploader Customization */
+    .stFileUploader {
+        padding: 1rem;
+        border: 1px dashed rgba(255,255,255,0.2);
+        border-radius: 15px;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -295,294 +211,186 @@ st.markdown(
 idx_to_label, label_to_idx, label_json_path = load_label_map()
 model, grad_model, conv_name, model_path = load_model_and_gradcam()
 
-# Sidebar – pipeline, artifacts, meta
+# ---- SIDEBAR ----
 with st.sidebar:
-    st.markdown("### Pipeline")
-    st.markdown(
-        """
-        <div class="sidebar-card">
-        <b>Model</b><br/>
-        • Conv1D → BN → MaxPool ×2<br/>
-        • GlobalAveragePooling1D<br/>
-        • Dense softmax head
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        """
-        <div style="height: 0.5rem;"></div>
-        <div class="sidebar-card">
-        <b>Features</b><br/>
-        • 16 kHz mono<br/>
-        • MFCC (13) + Δ + Δ² → 39 dims<br/>
-        • 25 ms window, 10 ms hop<br/>
-        • Fixed 80 frames via right padding
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        """
-        <div style="height: 0.5rem;"></div>
-        <div class="sidebar-card">
-        <b>Artifacts</b><br/>
-        Model: <code>vocapra_project/best_model*.h5</code><br/>
-        Labels: <code>vocapra_project/label_to_idx*.json</code>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.markdown("### ⚙️ System Config")
+    st.info(f"Model: {model_path.name if model_path else 'Not Found'}")
+    st.markdown("---")
+    st.markdown("**Architecture**")
+    st.caption("• Input: (80, 39)\n• Conv1D Stack\n• Global Avg Pool")
+    st.markdown("---")
+    st.markdown("**Audio Spec**")
+    st.caption(f"• Rate: {SR} Hz\n• Window: {WIN_LEN*1000:.0f}ms")
 
-# Guard rails if artifacts missing
 if model is None or not idx_to_label:
-    st.markdown(
-        """
-        <div class="app-header">
-          <div>
-            <div class="app-header-title">🎧 VOCAPRA Audio Event Explorer</div>
-            <div class="app-header-subtitle">
-              Tiny Conv1D model for goat vocalisation events – deployment console.
-            </div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.error(
-        "Model or label map not found.\n\n"
-        "Please ensure the following exist in your repository:\n\n"
-        "• `vocapra_project/best_model*.h5`\n"
-        "• `vocapra_project/label_to_idx*.json`"
-    )
+    st.error("⚠️ Artifacts missing. Please check `vocapra_project/` folder.")
     st.stop()
 
 # =============================================================================
-# MAIN HEADER
+# MAIN UI
 # =============================================================================
-st.markdown(
-    f"""
-    <div class="app-header">
-        <div>
-            <div class="app-header-title">🎧 VOCAPRA Audio Event Explorer</div>
-            <div class="app-header-subtitle">
-                Upload a goat vocalisation clip, let the tiny Conv1D model decode the context,
-                and inspect which temporal regions drove the decision.
-            </div>
-        </div>
-        <div>
-            <div class="tag-pill">v1 · Tiny ConvNet · TFLite-Ready</div>
-            <div style="height: 0.4rem;"></div>
-            <div class="tag-pill">Sampling: 16 kHz · Frames: 80 · Features: 39D</div>
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-st.write("")  # spacing
 
-# =============================================================================
-# LAYOUT: UPLOAD + CLASS PANEL
-# =============================================================================
-top_left, top_right = st.columns([1.8, 1.3])
+# Header
+st.markdown('<div class="gradient-text">VOCAPRA Explorer</div>', unsafe_allow_html=True)
+st.markdown('<div style="margin-top: -10px; color: #94a3b8;">Advanced Acoustic Event Detection & Interpretability Console</div>', unsafe_allow_html=True)
+st.write("") 
 
-with top_left:
-    st.markdown("#### 1 · Ingest audio")
-    st.markdown(
-        """
-        <div class="card">
-        <strong>Drop in a 16 kHz mono WAV file</strong><br/>
-        If your file uses a different sample rate or is stereo, the app will
-        transparently resample and fold it down to mono.
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    uploaded = st.file_uploader(
-        " ",
-        type=["wav"],
-        label_visibility="collapsed",
-        help="WAV only – internally resampled to 16 kHz mono.",
-    )
+# Layout: Upload & Stats
+col1, col2 = st.columns([1.5, 1])
 
-with top_right:
-    st.markdown("#### 2 · Model snapshot")
-    with st.container():
-        st.markdown(
-            """
-            <div class="card">
-              <b>Classes</b><br/>
-            """,
-            unsafe_allow_html=True,
-        )
-        st.write(", ".join(idx_to_label[i] for i in sorted(idx_to_label.keys())))
-        model_name_txt = model_path.name if model_path is not None else "best_model*.h5"
-        json_name_txt = label_json_path.name if label_json_path is not None else "label_to_idx*.json"
-        st.markdown(
-            f"""
-            <small>Loaded from <code>vocapra_project/{model_name_txt}</code><br/>
-            Labels from <code>vocapra_project/{json_name_txt}</code></small>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+with col1:
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    st.markdown('<div class="metric-label">1. AUDIO INPUT</div>', unsafe_allow_html=True)
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+    uploaded = st.file_uploader("Drop WAV file", type=["wav"], label_visibility="collapsed")
+    st.caption("Supports automatic resampling to 16kHz mono.")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with col2:
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    st.markdown('<div class="metric-label">SYSTEM STATUS</div>', unsafe_allow_html=True)
+    st.markdown(f"<div class='metric-value'>{len(idx_to_label)} <span style='font-size:1rem; color:#64748b'>classes</span></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='status-pill'>READY TO INFERENCE</div>", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 if uploaded is None:
-    st.info("👆 Upload a WAV file above to start the analysis.")
     st.stop()
 
 # =============================================================================
-# LOAD AUDIO
+# PROCESSING & PLOTTING
 # =============================================================================
+
+# Load Audio
 try:
     y, sr = librosa.load(uploaded, sr=SR, mono=True)
 except Exception:
     uploaded.seek(0)
     data, sr_raw = sf.read(uploaded)
-    if data.ndim == 2:
-        data = np.mean(data, axis=1)
+    if data.ndim == 2: data = np.mean(data, axis=1)
     y = librosa.resample(data, orig_sr=sr_raw, target_sr=SR)
     sr = SR
 
-duration = len(y) / sr
-
-audio_row_left, audio_row_right = st.columns([1.7, 1.3])
-
-with audio_row_left:
-    st.markdown("#### 3 · Signal preview")
-    st.markdown('<div class="plot-card">', unsafe_allow_html=True)
-    t = np.linspace(0, duration, num=len(y))
-    fig, ax = plt.subplots(figsize=(7, 2.4))
-    ax.plot(t, y, linewidth=0.9)
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Amplitude")
-    ax.set_title("Waveform")
-    ax.grid(alpha=0.18)
-    st.pyplot(fig)
-    plt.close(fig)
-    st.markdown("</div>", unsafe_allow_html=True)
-
-with audio_row_right:
-    st.markdown("#### 4 · Normalisation status")
-    with st.container():
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.write(f"**Duration:** {duration:.2f} s")
-        st.write(f"**Sample rate (internal):** {sr} Hz")
-        st.write(f"**Samples:** {len(y):,}")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-# =============================================================================
-# FEATURE EXTRACTION + PREDICTION
-# =============================================================================
+# Feature Extraction
 feats = compute_mfcc_with_deltas(y, sr=sr)
 fixed = to_fixed_frames(feats, TARGET_FRAMES)
 x_in = np.expand_dims(fixed, axis=0)
 
+# Prediction
 probs = model.predict(x_in, verbose=0)[0]
 pred_idx = int(np.argmax(probs))
 pred_label = idx_to_label.get(pred_idx, str(pred_idx))
+confidence = probs[pred_idx]
 
-st.markdown("#### 5 · Model decision")
+# --- RESULTS SECTION ---
+st.markdown("### Analysis Results")
 
-pred_cols = st.columns([1.4, 2.0])
+# 1. Prediction Banner
+st.markdown(
+    f"""
+    <div class="glass-card" style="border-left: 6px solid #2dd4bf;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+            <div>
+                <div class="metric-label">DETECTED EVENT</div>
+                <div class="metric-value">{pred_label}</div>
+            </div>
+            <div style="text-align:right;">
+                <div class="metric-label">CONFIDENCE</div>
+                <div class="metric-value">{confidence*100:.1f}%</div>
+            </div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
-with pred_cols[0]:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.markdown(
-        f"""
-        <span style="font-size: 0.8rem; text-transform: uppercase; opacity: 0.75;">
-        Primary hypothesis
-        </span><br/>
-        <span class="metric-main">{pred_label}</span>
-        <span class="prob-badge">{probs[pred_idx]*100:.1f}% confidence</span>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown("</div>", unsafe_allow_html=True)
+# 2. Plots (Waveform + Probabilities)
+c_wave, c_probs = st.columns([1.8, 1.2])
 
-with pred_cols[1]:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.write("**Probability distribution (top classes)**")
-
-    sorted_indices = np.argsort(probs)[::-1]
-    top_k = min(8, len(sorted_indices))
-    top_indices = sorted_indices[:top_k]
-    top_labels = [idx_to_label[i] for i in top_indices]
-    top_values = probs[top_indices]
-
-    fig, ax = plt.subplots(figsize=(6, 3))
-    ax.barh(range(top_k), top_values[::-1])
-    ax.set_yticks(range(top_k))
-    ax.set_yticklabels(top_labels[::-1])
-    ax.set_xlabel("Probability")
-    ax.set_xlim(0, 1.0)
-    ax.set_title("Top-k class probabilities")
-    plt.tight_layout()
+with c_wave:
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    st.markdown('<div class="metric-label">SIGNAL WAVEFORM</div>', unsafe_allow_html=True)
+    
+    fig, ax = plt.subplots(figsize=(8, 2.5))
+    # Make background transparent
+    fig.patch.set_alpha(0)
+    ax.patch.set_alpha(0)
+    
+    # Plot line with cyan color
+    ax.plot(np.linspace(0, len(y)/sr, len(y)), y, color='#2dd4bf', linewidth=0.8, alpha=0.9)
+    style_axis(ax)
+    ax.set_xlabel("Time (s)")
+    ax.grid(color='white', alpha=0.05)
+    
     st.pyplot(fig)
     plt.close(fig)
+    st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown(
-        "<small>Raw probabilities:</small>",
-        unsafe_allow_html=True,
+with c_probs:
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    st.markdown('<div class="metric-label">CLASS PROBABILITIES</div>', unsafe_allow_html=True)
+    
+    sorted_indices = np.argsort(probs)[::-1][:5]
+    top_labels = [idx_to_label[i] for i in sorted_indices]
+    top_vals = probs[sorted_indices]
+    
+    fig, ax = plt.subplots(figsize=(5, 2.5))
+    fig.patch.set_alpha(0)
+    ax.patch.set_alpha(0)
+    
+    # Horizontal bars with gradient-like colors
+    bars = ax.barh(range(len(top_vals)), top_vals[::-1], color='#38bdf8', alpha=0.8)
+    ax.set_yticks(range(len(top_vals)))
+    ax.set_yticklabels(top_labels[::-1], color='#e2e8f0', fontsize=9)
+    style_axis(ax)
+    ax.set_xlabel("Probability")
+    ax.set_xlim(0, 1)
+    
+    st.pyplot(fig)
+    plt.close(fig)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+# 3. Grad-CAM
+st.markdown("### Model Introspection")
+st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+st.markdown(f'<div class="metric-label">TEMPORAL ACTIVATION MAP (Grad-CAM) FOR: <span style="color:#2dd4bf">{pred_label}</span></div>', unsafe_allow_html=True)
+
+if grad_model:
+    cam, _ = run_gradcam(grad_model, x_in)
+    
+    fig, ax = plt.subplots(figsize=(12, 3.5))
+    fig.patch.set_alpha(0)
+    ax.patch.set_alpha(0)
+    
+    # Background: The Features (MFCC)
+    # Using 'gray' cmap for features to make the CAM pop
+    ax.imshow(fixed.T, origin="lower", aspect="auto", cmap='gray', alpha=0.3)
+    
+    # Overlay: The Grad-CAM heatmap
+    # Using 'magma' or 'inferno' for that "Cyber" look (better than jet)
+    extent = [0, fixed.shape[0], 0, fixed.shape[1]]
+    im = ax.imshow(
+        np.tile(cam, (fixed.shape[1], 1)),
+        origin="lower", 
+        aspect="auto", 
+        alpha=0.65, 
+        cmap='magma', 
+        extent=extent
     )
-    st.json({idx_to_label[i]: float(probs[i]) for i in range(len(probs))})
-    st.markdown("</div>", unsafe_allow_html=True)
-
-# =============================================================================
-# GRAD-CAM SECTION
-# =============================================================================
-st.markdown("#### 6 · Model introspection (Grad-CAM)")
-
-if grad_model is None:
-    st.warning(
-        "Grad-CAM disabled: no Conv1D layer detected in the model architecture."
-    )
+    
+    style_axis(ax)
+    ax.set_xlabel("Time Frames")
+    ax.set_ylabel("MFCC Coefficients")
+    
+    # Add a colorbar that fits the theme
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.ax.yaxis.set_tick_params(color='#cccccc')
+    plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='#cccccc')
+    cbar.outline.set_edgecolor('#444444')
+    
+    st.pyplot(fig)
+    plt.close(fig)
 else:
-    cam, cam_class_idx = run_gradcam(grad_model, x_in)
-    cam_class_label = idx_to_label.get(cam_class_idx, str(cam_class_idx))
+    st.warning("Grad-CAM unavailable (Model architecture incompatible).")
 
-    gc_left, gc_right = st.columns([2.1, 1.1])
-
-    with gc_left:
-        st.markdown('<div class="plot-card">', unsafe_allow_html=True)
-        st.caption(
-            f"Grad-CAM heatmap for class **{cam_class_label}** "
-            f"(index {cam_class_idx}). Colours highlight time regions "
-            "that were most influential for this decision."
-        )
-
-        fig, ax = plt.subplots(figsize=(8, 3))
-        ax.imshow(fixed.T, origin="lower", aspect="auto")
-        ax.imshow(
-            np.tile(cam, (fixed.shape[1], 1)),
-            origin="lower",
-            aspect="auto",
-            alpha=0.45,
-            cmap="jet",
-        )
-        ax.set_xlabel("Time frames")
-        ax.set_ylabel("Feature bins (MFCC + Δ + Δ²)")
-        ax.set_title("Grad-CAM overlay on feature map")
-        plt.tight_layout()
-        st.pyplot(fig)
-        plt.close(fig)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with gc_right:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.write("**How to read this**")
-        st.markdown(
-            """
-            • The horizontal axis is time (frame index).  
-            • Hot colours (yellow / red) = frames that strongly supported the prediction.  
-            • Cooler colours = frames with little impact.  
-            • This is particularly useful for aligning events with husbandry logs
-              or video footage.
-            """,
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-
-st.markdown("---")
-st.caption(
-    "VOCAPRA · Tiny Conv1D audio event model • Designed for TFLite and edge deployment."
-)
+st.markdown('</div>', unsafe_allow_html=True)
+st.markdown('<div style="text-align: center; color: #475569; font-size: 0.8rem; margin-top: 2rem;">VOCAPRA AI · 2025</div>', unsafe_allow_html=True)
