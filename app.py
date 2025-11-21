@@ -79,9 +79,7 @@ def load_label_map():
     idx_to_label = {int(v): k for k, v in label_to_idx.items()}
     return idx_to_label, label_to_idx, json_path
 
- 
-
-   def run_gradcam(grad_model, sample):
+ def run_gradcam(grad_model, sample):
     """
     Compute Grad-CAM for a single sample (shape: (1, T, F)).
     Returns:
@@ -99,24 +97,19 @@ def load_label_map():
         else:
             preds_tensor = preds  # shape (1, C)
 
-        # Get scalar Python int for predicted class
-        class_idx_tensor = tf.argmax(preds_tensor[0])   # shape () scalar
-        class_idx = int(class_idx_tensor.numpy())       # plain int
+        class_idx_tensor = tf.argmax(preds_tensor[0])   # scalar
+        class_idx = int(class_idx_tensor.numpy())
 
-        # Loss = logit of the predicted class
-        loss = preds_tensor[:, class_idx]               # shape (1,)
+        loss = preds_tensor[:, class_idx]
 
-    # Gradient w.r.t. conv feature map
-    grads = tape.gradient(loss, conv_outs)              # (1, T', C)
-    weights = tf.reduce_mean(grads, axis=1)             # (1, C)
+    grads = tape.gradient(loss, conv_outs)
+    weights = tf.reduce_mean(grads, axis=1)
 
-    cam = tf.reduce_sum(conv_outs * weights[:, tf.newaxis, :], axis=-1)  # (1, T')
-    cam = tf.nn.relu(cam).numpy()[0]                    # (T',)
+    cam = tf.reduce_sum(conv_outs * weights[:, tf.newaxis, :], axis=-1)
+    cam = tf.nn.relu(cam).numpy()[0]
 
-    # Normalize to [0, 1]
     cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-9)
 
-    # Resize CAM to match input time axis T
     T_in = sample.shape[1]
     T_cam = cam.shape[0]
     cam_resized = np.interp(
