@@ -1,7 +1,18 @@
-streamlit
-tensorflow-cpu==2.15.0
-librosa==0.10.1
+# Streamlit UI
+streamlit==1.39.0
+
+# TensorFlow (works with Python 3.11 on Streamlit Cloud)
+tensorflow==2.17.0
+
+# Audio processing
+librosa==0.10.2.post1
 soundfile
-numpy==1.26.4
+numpy<2.0.0
 scipy
+
+# Plotting
 matplotlib
+
+# Small TF dependency tweak
+protobuf<4
+packaging
