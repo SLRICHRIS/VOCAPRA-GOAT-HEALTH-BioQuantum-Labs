@@ -1,75 +1,45 @@
 #!/usr/bin/env python3
 """
-VOCAPRA Audio Explorer
-----------------------
+VOCAPRA Streamlit App
 
-Streamlit web app for your VOCAPRA pipeline:
+Elite UI for:
+- Uploading a WAV file
+- Running VOCAPRA MFCC pipeline
+- Predicting with best_model.h5 (Conv1D tiny CRNN-like model)
+- Showing class probabilities
+- Displaying Grad-CAM-like saliency over the feature map
 
-- Upload a WAV file
-- Run the trained Conv1D model (best_model.h5)
-- See top-k class probabilities
-- Visualize MFCC features and a Grad-CAM-like saliency map
-
-Designed for deployment on Streamlit Cloud.
+Make sure you have the artifacts from training:
+  vocapra_project/best_model.h5
+  vocapra_project/label_to_idx.json
 """
 
 from __future__ import annotations
 
-import io
+import json
 from pathlib import Path
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, Optional
 
 import numpy as np
-import pandas as pd
-import soundfile as sf
-import librosa
-import matplotlib.pyplot as plt
 import streamlit as st
+import librosa
+import soundfile as sf
 import tensorflow as tf
-from tensorflow.keras import Model
+import matplotlib.pyplot as plt
 
-# =========================
-# CONFIG (must match training)
-# =========================
-
+# ----------------- CONFIG (must match training) ----------------- #
 SR = 16000
 N_MFCC = 13
-WIN_LEN = 0.025   # seconds
-HOP_LEN = 0.010   # seconds
+WIN_LEN = 0.025
+HOP_LEN = 0.010
 TARGET_FRAMES = 80
 
-MODEL_DIR = Path("vocapra_project")   # change to Path(".") if you move files to root
-MODEL_PATH = MODEL_DIR / "best_model.h5"
-LABEL_MAP_PATH = MODEL_DIR / "label_to_idx.json"
+ARTIFACT_DIR = Path("vocapra_project")
+MODEL_PATH = ARTIFACT_DIR / "best_model.h5"
+LABEL_MAP_PATH = ARTIFACT_DIR / "label_to_idx.json"
 
 
-# =========================
-# Audio / Feature utilities
-# =========================
-
-def load_audio_from_uploaded(file) -> Tuple[np.ndarray, int]:
-    """
-    Load audio from a Streamlit UploadedFile.
-    Returns mono float32 waveform and sampling rate.
-    """
-    data = file.read()
-    # use soundfile to read from bytes
-    y, sr = sf.read(io.BytesIO(data), always_2d=False)
-
-    # Convert to mono if stereo
-    if y.ndim == 2:
-        y = np.mean(y, axis=1)
-
-    y = y.astype(np.float32)
-
-    # Resample if needed
-    if sr != SR:
-        y = librosa.resample(y, orig_sr=sr, target_sr=SR)
-        sr = SR
-
-    return y, sr
-
-
+# ----------------- FEATURE PIPELINE ----------------- #
 def compute_mfcc_with_deltas(
     y: np.ndarray,
     sr: int = SR,
@@ -77,328 +47,277 @@ def compute_mfcc_with_deltas(
     win_len: float = WIN_LEN,
     hop_len: float = HOP_LEN,
 ) -> np.ndarray:
-    """
-    Compute MFCC + Δ + Δ² features for waveform y.
-    Returns (T, 3*n_mfcc).
-    """
+    """MFCC + Δ + Δ², exactly as in training."""
     n_fft = int(win_len * sr)
     hop_length = int(hop_len * sr)
 
     mf = librosa.feature.mfcc(
-        y=y,
-        sr=sr,
-        n_mfcc=n_mfcc,
-        n_fft=n_fft,
-        hop_length=hop_length,
+        y=y, sr=sr, n_mfcc=n_mfcc, n_fft=n_fft, hop_length=hop_length
     )  # (n_mfcc, T)
-
     mf = mf.T  # (T, n_mfcc)
+
     d1 = librosa.feature.delta(mf.T).T
     d2 = librosa.feature.delta(mf.T, order=2).T
 
-    feats = np.concatenate([mf, d1, d2], axis=1)
-    return feats.astype(np.float32)
+    feats = np.concatenate([mf, d1, d2], axis=1).astype(np.float32)
+    return feats
 
 
-def pad_or_truncate(feats: np.ndarray, target_frames: int = TARGET_FRAMES) -> np.ndarray:
-    """
-    Pad or truncate a (T, F) feature sequence to (target_frames, F).
-    Uses right alignment (same as your training script).
-    """
-    T, F = feats.shape
+def to_fixed_frames(seq: np.ndarray, target_frames: int = TARGET_FRAMES) -> np.ndarray:
+    """Right-pad / truncate a (T, F) feature seq to (target_frames, F)."""
+    T, F = seq.shape
     out = np.zeros((target_frames, F), dtype=np.float32)
     if T >= target_frames:
-        out[:] = feats[:target_frames]
+        out[:] = seq[:target_frames]
     else:
-        out[-T:, :] = feats
+        out[-T:, :] = seq
     return out
 
 
-# =========================
-# Model loading & Grad-CAM
-# =========================
-
-@st.cache_resource(show_spinner=True)
-def load_model_and_metadata() -> Tuple[Model, Model, List[str]]:
-    """
-    Load Keras model and build a Grad-CAM helper model.
-    Returns:
-        model      : full classifier
-        grad_model : model that outputs conv activations + predictions
-        idx_to_lbl : list mapping class index -> label string
-    """
+# ----------------- MODEL LOADING + GRADCAM ----------------- #
+@st.cache_resource(show_spinner=False)
+def load_model_and_gradcam() -> Tuple[Optional[tf.keras.Model], Optional[tf.keras.Model], Optional[str]]:
+    """Load Keras model and build grad_model (for last Conv1D layer)."""
     if not MODEL_PATH.exists():
-        st.error(f"Model file not found at: {MODEL_PATH}")
-        st.stop()
+        return None, None, None
 
-    if not LABEL_MAP_PATH.exists():
-        st.error(f"Label map JSON not found at: {LABEL_MAP_PATH}")
-        st.stop()
-
-    # Load label map
-    import json
-    with LABEL_MAP_PATH.open("r") as f:
-        label_to_idx: Dict[str, int] = json.load(f)
-
-    idx_to_lbl = [None] * len(label_to_idx)
-    for lbl, idx in label_to_idx.items():
-        idx_to_lbl[idx] = lbl
-
-    # Load Keras model
     model = tf.keras.models.load_model(MODEL_PATH)
 
     # Find last Conv1D layer for Grad-CAM
-    conv_layer_name: Optional[str] = None
+    conv_layer_name = None
     for layer in reversed(model.layers):
         if isinstance(layer, tf.keras.layers.Conv1D):
             conv_layer_name = layer.name
             break
 
-    if conv_layer_name is None:
-        st.warning("No Conv1D layer found for Grad-CAM. Saliency will be disabled.")
-        grad_model = None
-    else:
+    grad_model = None
+    if conv_layer_name is not None:
         conv_layer = model.get_layer(conv_layer_name)
         grad_model = tf.keras.models.Model(
-            [model.inputs],
-            [conv_layer.output, model.output],
-            name="grad_cam_helper",
+            [model.inputs], [conv_layer.output, model.output]
         )
 
-    return model, grad_model, idx_to_lbl
+    return model, grad_model, conv_layer_name
 
 
-def run_model_on_feats(model: Model, feats: np.ndarray) -> np.ndarray:
-    """
-    Run the classifier on a single (T, F) feature tensor.
-    Returns probabilities of shape (num_classes,).
-    """
-    x = feats[np.newaxis, ...]  # (1, T, F)
-    probs = model.predict(x, verbose=0)[0]
-    return probs
+@st.cache_resource(show_spinner=False)
+def load_label_map() -> Tuple[Dict[int, str], Dict[str, int]]:
+    """Load label_to_idx.json and also return idx_to_label."""
+    if not LABEL_MAP_PATH.exists():
+        return {}, {}
+    with open(LABEL_MAP_PATH, "r") as f:
+        label_to_idx = json.load(f)
+    idx_to_label = {int(v): k for k, v in label_to_idx.items()}
+    return idx_to_label, label_to_idx
 
 
-def compute_gradcam(
-    grad_model: Model,
-    feats: np.ndarray,
+def run_gradcam(
+    grad_model: tf.keras.Model,
+    sample: np.ndarray,
 ) -> np.ndarray:
     """
-    Compute a 1D Grad-CAM activation vector aligned with time frames.
-
-    Args:
-        grad_model: model that outputs (conv_activations, predictions)
-        feats: (T, F) feature matrix
-
-    Returns:
-        cam_resized: (T,) saliency in [0, 1]
+    Compute Grad-CAM along time axis for a single sample (1, T, F).
+    Returns a 1D CAM of length T (aligned with input frames).
     """
-    x = feats[np.newaxis, ...]  # (1, T, F)
+    sample_tf = tf.convert_to_tensor(sample)  # (1, T, F)
 
     with tf.GradientTape() as tape:
-        conv_out, preds = grad_model(tf.convert_to_tensor(x))
+        conv_outs, preds = grad_model(sample_tf)
         class_idx = tf.argmax(preds[0])
         loss = preds[:, class_idx]
 
-    grads = tape.gradient(loss, conv_out)          # (1, T', C)
-    weights = tf.reduce_mean(grads, axis=1)        # (1, C)
-    cam = tf.reduce_sum(conv_out * weights[:, tf.newaxis, :], axis=-1)[0]  # (T',)
+    grads = tape.gradient(loss, conv_outs)          # (1, T', C)
+    weights = tf.reduce_mean(grads, axis=1)         # (1, C)
+    cam = tf.reduce_sum(conv_outs * weights[:, tf.newaxis, :], axis=-1)  # (1, T')
+    cam = tf.nn.relu(cam).numpy()[0]               # (T',)
 
-    cam = tf.nn.relu(cam).numpy()
+    # Normalize
     cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-9)
 
-    # Resize CAM to input feature time length
-    T_in = feats.shape[0]
+    # Resize CAM to input time axis T
+    T_in = sample.shape[1]
     T_cam = cam.shape[0]
     cam_resized = np.interp(
         np.linspace(0, T_cam - 1, T_in),
         np.arange(T_cam),
         cam,
     )
-    return cam_resized
+    return cam_resized, int(class_idx.numpy())
 
 
-# =========================
-# Plotting helpers
-# =========================
+# ----------------- STREAMLIT UI ----------------- #
+st.set_page_config(
+    page_title="VOCAPRA Audio Event Explorer",
+    page_icon="🎧",
+    layout="wide",
+)
 
-def plot_waveform(y: np.ndarray, sr: int) -> plt.Figure:
-    t = np.arange(len(y)) / sr
+st.markdown(
+    """
+    <style>
+    .big-pred {
+        font-size: 2rem;
+        font-weight: 700;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.title("🎧 VOCAPRA Audio Event Explorer")
+st.caption(
+    "Upload a WAV file, see the tiny Conv1D model's prediction, "
+    "and explore which time regions mattered via a Grad-CAM heatmap."
+)
+
+# Sidebar info
+with st.sidebar:
+    st.header("Pipeline")
+    st.markdown(
+        """
+        **Model**  
+        • 1D Conv → BN → MaxPool (x2)  
+        • GlobalAveragePooling → Dense softmax  
+
+        **Features**  
+        • MFCC (13) + Δ + Δ² = 39 dims  
+        • 16 kHz mono, 25 ms window, 10 ms hop.  
+        • Fixed **80 frames** via right padding.
+        """
+    )
+    st.markdown("---")
+    st.info(
+        "Artifacts expected at:\n"
+        "`vocapra_project/best_model.h5`\n"
+        "`vocapra_project/label_to_idx.json`"
+    )
+
+idx_to_label, label_to_idx = load_label_map()
+model, grad_model, conv_name = load_model_and_gradcam()
+
+if model is None or not idx_to_label:
+    st.error(
+        "Model or label map not found.\n\n"
+        "Please upload/commit `vocapra_project/best_model.h5` and "
+        "`vocapra_project/label_to_idx.json` to the repo."
+    )
+    st.stop()
+
+col_upload, col_info = st.columns([2, 1])
+
+with col_upload:
+    uploaded = st.file_uploader(
+        "Upload a 16 kHz mono WAV file",
+        type=["wav"],
+        help="It will be resampled to 16 kHz and converted to mono if needed.",
+    )
+
+with col_info:
+    st.subheader("Classes")
+    st.write(", ".join(idx_to_label[i] for i in sorted(idx_to_label.keys())))
+
+if uploaded is None:
+    st.info("👆 Upload a WAV file to start.")
+    st.stop()
+
+# ----------------- Load audio ----------------- #
+try:
+    # Using librosa directly from file-like object
+    y, sr = librosa.load(uploaded, sr=SR, mono=True)
+except Exception:
+    # Fallback via soundfile
+    uploaded.seek(0)
+    data, sr_raw = sf.read(uploaded)
+    if data.ndim == 2:
+        data = np.mean(data, axis=1)
+    y = librosa.resample(data, orig_sr=sr_raw, target_sr=SR)
+    sr = SR
+
+duration = len(y) / sr
+
+st.success(f"Loaded audio: {duration:.2f} seconds @ {sr} Hz")
+
+with st.expander("🔊 Waveform preview", expanded=False):
+    # Show simple waveform
+    t = np.linspace(0, duration, num=len(y))
     fig, ax = plt.subplots(figsize=(8, 2))
     ax.plot(t, y)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Amplitude")
     ax.set_title("Waveform")
-    ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    return fig
+    st.pyplot(fig)
+    plt.close(fig)
 
+# ----------------- Feature extraction + prediction ----------------- #
+feats = compute_mfcc_with_deltas(y, sr=sr)
+fixed = to_fixed_frames(feats, TARGET_FRAMES)
+x_in = np.expand_dims(fixed, axis=0)  # (1, T, F)
 
-def plot_mfcc(feats: np.ndarray) -> plt.Figure:
-    fig, ax = plt.subplots(figsize=(8, 3))
-    im = ax.imshow(
-        feats.T,
-        origin="lower",
-        aspect="auto",
-    )
-    ax.set_xlabel("Time frames")
-    ax.set_ylabel("Feature bins (MFCC + Δ + Δ²)")
-    ax.set_title("MFCC Feature Map")
-    fig.colorbar(im, ax=ax, fraction=0.025, pad=0.02)
-    fig.tight_layout()
-    return fig
-
-
-def plot_gradcam_overlay(feats: np.ndarray, cam: np.ndarray) -> plt.Figure:
-    """
-    Overlay Grad-CAM saliency over feature map.
-    """
-    fig, ax = plt.subplots(figsize=(8, 3))
-    ax.imshow(
-        feats.T,
-        origin="lower",
-        aspect="auto",
-    )
-    ax.imshow(
-        np.tile(cam, (feats.shape[1], 1)),
-        origin="lower",
-        aspect="auto",
-        cmap="jet",
-        alpha=0.45,
-    )
-    ax.set_xlabel("Time frames")
-    ax.set_ylabel("Feature bins")
-    ax.set_title("Grad-CAM Time Saliency Overlay")
-    fig.colorbar(
-        plt.cm.ScalarMappable(cmap="jet"),
-        ax=ax,
-        fraction=0.025,
-        pad=0.02,
-        label="Saliency",
-    )
-    fig.tight_layout()
-    return fig
-
-
-# =========================
-# Streamlit UI
-# =========================
-
-st.set_page_config(
-    page_title="VOCAPRA Audio Intelligence",
-    page_icon="🎧",
-    layout="wide",
-)
-
-st.title("🎧 VOCAPRA Audio Intelligence Dashboard")
-st.caption(
-    "Elite CRNN-inspired Conv1D model · MFCC + Δ + Δ² features · "
-    "Keras inference + Grad-CAM saliency."
-)
-
-with st.sidebar:
-    st.header("Pipeline Status")
-    st.write(f"**Sampling rate:** {SR} Hz")
-    st.write(f"**MFCCs:** {N_MFCC} (with Δ and Δ² → {3 * N_MFCC} dims)")
-    st.write(f"**Target frames:** {TARGET_FRAMES}")
-    st.markdown("---")
-    st.info(
-        "Upload a single `.wav` file. The app will resample to 16 kHz, "
-        "compute MFCC(+Δ,+Δ²), run the trained model, and render Grad-CAM."
-    )
-
-# Load model & metadata once
-model, grad_model, idx_to_lbl = load_model_and_metadata()
-num_classes = len(idx_to_lbl)
-
-uploaded = st.file_uploader(
-    "Upload a WAV file for analysis",
-    type=["wav"],
-    accept_multiple_files=False,
-)
-
-if uploaded is None:
-    st.warning("Waiting for an audio file…")
-    st.stop()
-
-# ---------------------------------------------------------
-# 1) Raw audio + waveform
-# ---------------------------------------------------------
-
-st.subheader("1. Raw Audio")
-
-col_a, col_b = st.columns([2, 3])
-
-with col_a:
-    st.audio(uploaded, format="audio/wav")
-
-with col_b:
-    y, sr = load_audio_from_uploaded(uploaded)
-    fig_wav = plot_waveform(y, sr)
-    st.pyplot(fig_wav, use_container_width=True)
-
-# ---------------------------------------------------------
-# 2) Feature extraction
-# ---------------------------------------------------------
-
-st.subheader("2. MFCC Feature Extraction")
-
-feats_seq = compute_mfcc_with_deltas(y, sr)         # (T, F)
-feats_fixed = pad_or_truncate(feats_seq, TARGET_FRAMES)  # (TARGET_FRAMES, F)
-
-st.write(f"**Original frames:** {feats_seq.shape[0]} → "
-         f"**Padded/trimmed to:** {feats_fixed.shape[0]} frames")
-st.write(f"**Feature dimension:** {feats_fixed.shape[1]}")
-
-fig_mfcc = plot_mfcc(feats_fixed)
-st.pyplot(fig_mfcc, use_container_width=True)
-
-# ---------------------------------------------------------
-# 3) Model prediction
-# ---------------------------------------------------------
-
-st.subheader("3. Model Prediction")
-
-probs = run_model_on_feats(model, feats_fixed)  # (num_classes,)
-
-top_k = min(5, num_classes)
-top_indices = np.argsort(probs)[::-1][:top_k]
-top_labels = [idx_to_lbl[i] for i in top_indices]
-top_probs = probs[top_indices]
-
-df_pred = pd.DataFrame(
-    {
-        "Rank": np.arange(1, top_k + 1),
-        "Class": top_labels,
-        "Probability": top_probs,
-    }
-)
-df_pred["Probability"] = df_pred["Probability"].map(lambda x: f"{x:.3f}")
-
-st.table(df_pred)
-
+probs = model.predict(x_in, verbose=0)[0]  # (C,)
 pred_idx = int(np.argmax(probs))
-pred_label = idx_to_lbl[pred_idx]
-st.success(f"**Predicted class:** `{pred_label}` (index {pred_idx})")
+pred_label = idx_to_label.get(pred_idx, str(pred_idx))
 
-# ---------------------------------------------------------
-# 4) Grad-CAM saliency
-# ---------------------------------------------------------
+st.markdown(
+    f"<div class='big-pred'>Predicted event: {pred_label}</div>",
+    unsafe_allow_html=True,
+)
 
-st.subheader("4. Grad-CAM Time Saliency")
+# ----------------- Probability chart ----------------- #
+st.subheader("Class probabilities")
+
+sorted_indices = np.argsort(probs)[::-1]
+top_k = min(8, len(sorted_indices))
+top_indices = sorted_indices[:top_k]
+top_labels = [idx_to_label[i] for i in top_indices]
+top_values = probs[top_indices]
+
+prob_cols = st.columns([3, 2])
+with prob_cols[0]:
+    fig, ax = plt.subplots(figsize=(6, 3))
+    ax.barh(range(top_k), top_values[::-1])
+    ax.set_yticks(range(top_k))
+    ax.set_yticklabels(top_labels[::-1])
+    ax.set_xlabel("Probability")
+    ax.set_title("Top class probabilities")
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
+
+with prob_cols[1]:
+    st.metric("Top class", pred_label, f"{probs[pred_idx]*100:.1f}%")
+    st.write("Full distribution:")
+    st.json({idx_to_label[i]: float(probs[i]) for i in range(len(probs))})
+
+# ----------------- Grad-CAM ----------------- #
+st.subheader("Grad-CAM: time segments that mattered")
 
 if grad_model is None:
-    st.warning("Grad-CAM is disabled because no Conv1D layer was found.")
+    st.warning("Grad-CAM disabled: no Conv1D layer detected in the model.")
 else:
-    cam = compute_gradcam(grad_model, feats_fixed)   # (T,)
+    cam, cam_class_idx = run_gradcam(grad_model, x_in)
+    cam_class_label = idx_to_label.get(cam_class_idx, str(cam_class_idx))
 
-    with st.expander("Show Grad-CAM raw vector", expanded=False):
-        st.write(cam)
+    st.caption(
+        f"Grad-CAM computed for predicted class: **{cam_class_label}** "
+        f"(index {cam_class_idx})"
+    )
 
-    fig_cam = plot_gradcam_overlay(feats_fixed, cam)
-    st.pyplot(fig_cam, use_container_width=True)
+    fig, ax = plt.subplots(figsize=(8, 3))
+    # Show feature map (MFCC+Δ+Δ²)
+    ax.imshow(fixed.T, origin="lower", aspect="auto")
+    ax.imshow(
+        np.tile(cam, (fixed.shape[1], 1)),
+        origin="lower",
+        aspect="auto",
+        alpha=0.45,
+        cmap="jet",
+    )
+    ax.set_xlabel("Time frames")
+    ax.set_ylabel("Feature bins (MFCC+Δ+Δ²)")
+    ax.set_title("Grad-CAM overlay on feature map")
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close(fig)
 
 st.markdown("---")
-st.caption(
-    "Backend: TF 2.x Conv1D classifier · INT8-ready architecture · "
-    "Feature pipeline synchronized with training script."
-)
+st.caption("Built with ❤️ on a tiny Conv1D VOCAPRA pipeline, ready for TFLite deployment.")
