@@ -79,84 +79,53 @@ def load_label_map():
     idx_to_label = {int(v): k for k, v in label_to_idx.items()}
     return idx_to_label, label_to_idx, json_path
 
-  def run_gradcam(grad_model, sample):
-    """
-    Compute a 1D Grad-CAM importance curve over time for one audio example.
+ 
 
-    Parameters
-    ----------
-    grad_model : tf.keras.Model
-        A model that takes the network input and returns:
-            (conv_feature_maps, class_logits)
-        where:
-            conv_feature_maps has shape (1, T_conv, C)
-            class_logits      has shape (1, num_classes)
-    sample : np.ndarray
-        Single example with shape (1, T_in, F), where
-            T_in = number of time frames after padding/truncation
-            F    = number of features per frame (e.g., 39 for MFCC+Δ+Δ²)
-
-    Returns
-    -------
-    cam_resized : np.ndarray, shape (T_in,)
-        Grad-CAM weights in [0, 1] for each input time frame.
-        Higher values = time segments that influenced the prediction more.
-    class_idx : int
-        Predicted class index used to compute Grad-CAM.
+   def run_gradcam(grad_model, sample):
     """
-    # Convert to tensor: shape (1, T_in, F)
-    sample_tf = tf.convert_to_tensor(sample)
+    Compute Grad-CAM for a single sample (shape: (1, T, F)).
+    Returns:
+        cam_resized: (T,) Grad-CAM weights over time
+        class_idx:   int, predicted class index
+    """
+    sample_tf = tf.convert_to_tensor(sample)  # (1, T, F)
 
     with tf.GradientTape() as tape:
-        # Forward pass through grad_model:
-        #   conv_outs: (1, T_conv, C)
-        #   preds:     (1, num_classes) or a list/tuple of outputs
         conv_outs, preds = grad_model(sample_tf)
 
-        # Handle models with multiple outputs by taking the last as logits
+        # If model has multiple outputs, grab the last one as logits
         if isinstance(preds, (list, tuple)):
             preds_tensor = preds[-1]
         else:
-            preds_tensor = preds
+            preds_tensor = preds  # shape (1, C)
 
-        # Predicted class index as a plain Python int
-        class_idx_tensor = tf.argmax(preds_tensor[0])   # scalar ()
-        class_idx = int(class_idx_tensor.numpy())
+        # Get scalar Python int for predicted class
+        class_idx_tensor = tf.argmax(preds_tensor[0])   # shape () scalar
+        class_idx = int(class_idx_tensor.numpy())       # plain int
 
-        # Use the logit of the predicted class as the "loss" for Grad-CAM
-        # Shape of loss: (1,)
-        loss = preds_tensor[:, class_idx]
+        # Loss = logit of the predicted class
+        loss = preds_tensor[:, class_idx]               # shape (1,)
 
-    # Gradient of the predicted-class logit with respect to conv feature maps
-    # grads:   (1, T_conv, C)
-    grads = tape.gradient(loss, conv_outs)
+    # Gradient w.r.t. conv feature map
+    grads = tape.gradient(loss, conv_outs)              # (1, T', C)
+    weights = tf.reduce_mean(grads, axis=1)             # (1, C)
 
-    # Channel-wise importance: average gradient over time axis
-    # weights: (1, C)
-    weights = tf.reduce_mean(grads, axis=1)
+    cam = tf.reduce_sum(conv_outs * weights[:, tf.newaxis, :], axis=-1)  # (1, T')
+    cam = tf.nn.relu(cam).numpy()[0]                    # (T',)
 
-    # Weighted sum of feature maps across channels → 1D CAM over time
-    # cam: (1, T_conv)
-    cam = tf.reduce_sum(conv_outs * weights[:, tf.newaxis, :], axis=-1)
-    cam = tf.nn.relu(cam).numpy()[0]  # (T_conv,)
-
-    # Normalize to [0, 1] for visualization
+    # Normalize to [0, 1]
     cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-9)
 
-    # ------------------------------------------------------------------
-    # Conv feature map length T_conv may differ from input length T_in
-    # because of pooling. We resample CAM to align with the input frames.
-    # ------------------------------------------------------------------
+    # Resize CAM to match input time axis T
     T_in = sample.shape[1]
-    T_conv = cam.shape[0]
-
+    T_cam = cam.shape[0]
     cam_resized = np.interp(
-        np.linspace(0, T_conv - 1, T_in),
-        np.arange(T_conv),
+        np.linspace(0, T_cam - 1, T_in),
+        np.arange(T_cam),
         cam,
     )
-
     return cam_resized, class_idx
+
 
 
 
