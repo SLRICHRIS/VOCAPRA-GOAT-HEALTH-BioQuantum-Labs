@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-VOCAPRA Streamlit App – Elite UI v5 (Google Material Edition)
+VOCAPRA Streamlit App – Elite UI v4.1 (Cyber-HUD Edition)
+Includes Copyright Footer
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, Tuple, Optional, List
 
 import numpy as np
 import streamlit as st
@@ -18,7 +19,7 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
 # =============================================================================
-# CONFIG (Model logic remains the same)
+# CONFIG
 # =============================================================================
 SR = 16000
 N_MFCC = 13
@@ -26,164 +27,267 @@ WIN_LEN = 0.025
 HOP_LEN = 0.010
 TARGET_FRAMES = 80
 ARTIFACT_DIR = Path("vocapra_project")
-# Placeholder functions for brevity (assuming they are defined as before)
-# resolve_artifact, compute_mfcc_with_deltas, to_fixed_frames, load_model_and_gradcam, load_label_map, run_gradcam
 
-# --- Dummy functions for display purposes if artifacts are missing ---
-def resolve_artifact(pattern: str) -> Optional[Path]: return Path("dummy.h5") # Always return a path for UI rendering
-def load_model_and_gradcam(): return True, True, "conv_1d", Path("voca_model.h5")
-def load_label_map(): return {0: "GOAT_CALL", 1: "MEOW", 2: "BARK"}, {v: k for k, v in {0: "GOAT_CALL", 1: "MEOW", 2: "BARK"}.items()}, Path("labels.json")
-def compute_mfcc_with_deltas(y: np.ndarray, sr: int = SR) -> np.ndarray: return np.zeros((80, 39), dtype=np.float32)
-def to_fixed_frames(seq: np.ndarray, target_frames: int = TARGET_FRAMES) -> np.ndarray: return np.zeros((80, 39), dtype=np.float32)
-def run_gradcam(grad_model, sample): return np.linspace(0, 1, 39), 0
-# --- End of Dummy functions ---
+# --- Utility Functions (Omitted for brevity, assumed unchanged) ---
+def resolve_artifact(pattern: str) -> Optional[Path]:
+    if not ARTIFACT_DIR.exists(): return None
+    matches: List[Path] = sorted(ARTIFACT_DIR.glob(pattern))
+    return matches[0] if matches else None
 
-# =============================================================================
-# MATERIAL PLOTTING STYLE
-# =============================================================================
+def compute_mfcc_with_deltas(y: np.ndarray, sr: int = SR) -> np.ndarray:
+    n_fft = int(WIN_LEN * sr)
+    hop_length = int(HOP_LEN * sr)
+    mf = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=N_MFCC, n_fft=n_fft, hop_length=hop_length)
+    mf = mf.T
+    d1 = librosa.feature.delta(mf.T).T
+    d2 = librosa.feature.delta(mf.T, order=2).T
+    feats = np.concatenate([mf, d1, d2], axis=1).astype(np.float32)
+    return feats
 
-def style_material_plot(ax, title=""):
-    """Applies a clean, high-contrast style for Matplotlib."""
-    ax.set_facecolor("#ffffff")
+def to_fixed_frames(seq: np.ndarray, target_frames: int = TARGET_FRAMES) -> np.ndarray:
+    T, F = seq.shape
+    out = np.zeros((target_frames, F), dtype=np.float32)
+    if T >= target_frames:
+        out[:] = seq[:target_frames]
+    else:
+        out[-T:, :] = seq
+    return out
+
+@st.cache_resource(show_spinner=False)
+def load_model_and_gradcam():
+    model_path = resolve_artifact("best_model*.h5")
+    if model_path is None: return None, None, None, None
+    model = tf.keras.models.load_model(model_path)
+    conv_layer_name = None
+    for layer in reversed(model.layers):
+        if isinstance(layer, tf.keras.layers.Conv1D):
+            conv_layer_name = layer.name
+            break
+    grad_model = None
+    if conv_layer_name is not None:
+        grad_model = tf.keras.models.Model([model.inputs], [model.get_layer(conv_layer_name).output, model.output])
+    return model, grad_model, conv_layer_name, model_path
+
+@st.cache_resource(show_spinner=False)
+def load_label_map():
+    json_path = resolve_artifact("label_to_idx*.json")
+    if json_path is None: return {}, {}, None
+    with open(json_path, "r") as f:
+        label_to_idx = json.load(f)
+    idx_to_label = {int(v): k for k, v in label_to_idx.items()}
+    return idx_to_label, label_to_idx, json_path
+
+def run_gradcam(grad_model, sample):
+    sample_tf = tf.convert_to_tensor(sample)
+    with tf.GradientTape() as tape:
+        conv_outs, preds = grad_model(sample_tf)
+        class_idx = tf.argmax(preds[0])
+        loss = preds[:, class_idx]
+    grads = tape.gradient(loss, conv_outs)
+    weights = tf.reduce_mean(grads, axis=1)
+    cam = tf.reduce_sum(conv_outs * weights[:, tf.newaxis, :], axis=-1)
+    cam = tf.nn.relu(cam).numpy()[0]
+    cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-9)
+    T_in = sample.shape[1]
+    T_cam = cam.shape[0]
+    cam_resized = np.interp(np.linspace(0, T_cam - 1, T_in), np.arange(T_cam), cam)
+    return cam_resized, int(class_idx.numpy())
+
+def make_neon_plot(x, y, color='#00f3ff', title="Waveform"):
+    """Creates a plot with a 'glow' effect by layering lines."""
+    fig, ax = plt.subplots(figsize=(8, 2.8))
+    fig.patch.set_alpha(0)
+    ax.patch.set_alpha(0)
+    
+    # The Core Line
+    ax.plot(x, y, color=color, linewidth=1.2, alpha=1.0)
+    
+    # The Glow Layers (Simulating bloom)
+    for n in range(1, 6):
+        ax.plot(x, y, color=color, linewidth=1.2 + n * 0.8, alpha=0.15 / n)
+
+    # Styling
+    ax.set_facecolor("none")
+    ax.spines['bottom'].set_color('#333333')
+    ax.spines['left'].set_visible(False)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_color('#dddddd')
-    ax.spines['bottom'].set_color('#dddddd')
-    ax.tick_params(axis='both', colors='#757575', labelsize=9)
-    ax.grid(axis='y', linestyle='--', alpha=0.4, color='#eeeeee')
-    ax.set_xlabel("Time (s)", color='#555555', fontsize=10)
-    ax.set_ylabel("", color='#555555', fontsize=10)
-    ax.set_title(title, color='#333333', fontsize=12)
+    ax.tick_params(axis='x', colors='#666666', labelsize=8)
+    ax.set_yticks([]) # Hide Y axis ticks for clean look
+    ax.set_xlabel("TIME DOMAIN", color='#444444', fontfamily='monospace', fontsize=8)
+    
+    return fig
+# -----------------------------------------------------------------
 
 # =============================================================================
 # UI SETUP & CSS
 # =============================================================================
-st.set_page_config(page_title="VOCAPRA Material", page_icon="🐐", layout="wide")
+st.set_page_config(page_title="VOCAPRA HUD", page_icon="💠", layout="wide")
 
-# --- CUSTOM CSS: Material Design Principles ---
 st.markdown(
     """
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;500;700&family=JetBrains+Mono:wght@400;700&display=swap');
 
-    /* 1. GLOBAL THEME (Light Mode & Roboto Font) */
+    /* --- GLOBAL THEME --- */
     [data-testid="stAppViewContainer"] {
-        background-color: #f7f7f7; /* Light background */
-        color: #3c4043; /* Google gray text */
+        background-color: #030508;
+        background-image: 
+            radial-gradient(circle at 15% 50%, rgba(0, 243, 255, 0.08), transparent 25%),
+            radial-gradient(circle at 85% 30%, rgba(188, 19, 254, 0.08), transparent 25%);
+        color: #e0e0e0;
     }
-    * { font-family: 'Roboto', sans-serif !important; }
+    [data-testid="stHeader"] { background: transparent; }
     
-    /* 2. HEADER/TITLE */
-    .material-title {
-        font-size: 2.5rem;
-        font-weight: 500;
-        color: #3c4043;
-        letter-spacing: -0.02em;
-        padding-bottom: 0.5rem;
-    }
-    .material-subtitle {
-        color: #5f6368;
-        font-size: 0.9rem;
-        margin-top: -10px;
-        margin-bottom: 20px;
-    }
-
-    /* 3. CARD (Elevation & Rounded Corners) */
-    .material-card {
-        background: #ffffff;
-        border-radius: 8px; /* Standard Material rounding */
-        padding: 20px;
-        box-shadow: 0 1px 2px 0 rgba(60,64,67,0.3), 
-                    0 1px 3px 1px rgba(60,64,67,0.15); /* Subtle Google shadow for elevation */
-        margin-bottom: 15px;
-        transition: box-shadow 0.3s ease;
-    }
-    .material-card:hover {
-        box-shadow: 0 4px 8px 3px rgba(60,64,67,0.15), 
-                    0 2px 3px 0 rgba(60,64,67,0.3); /* Higher elevation on hover */
-    }
+    /* --- TYPOGRAPHY --- */
+    * { font-family: 'Space Grotesk', sans-serif !important; }
+    code, pre, .mono { font-family: 'JetBrains Mono', monospace !important; }
     
-    /* 4. METRICS & LABELS */
-    .metric-label-google {
-        font-size: 0.8rem;
-        color: #5f6368; /* Google Gray */
-        text-transform: uppercase;
-        font-weight: 500;
-        letter-spacing: 0.05em;
-    }
-    .metric-value-google {
-        font-size: 2.2rem;
-        font-weight: 400;
-        color: #1a73e8; /* Google Blue */
-        margin-top: 5px;
-    }
-
-    /* 5. WIDGET STYLING (File Uploader) */
-    [data-testid="stFileUploader"] {
-        border: 1px dashed #dadce0; /* Light gray border */
-        background: #fcfcfc;
-        border-radius: 8px;
+    /* --- HUD CARD DESIGN --- */
+    .hud-card {
+        background: rgba(10, 15, 25, 0.7);
+        border: 1px solid rgba(0, 243, 255, 0.15);
+        border-radius: 4px;
         padding: 1.5rem;
-        transition: border-color 0.2s;
+        position: relative;
+        backdrop-filter: blur(8px);
+        box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        margin-bottom: 1rem;
+        /* Technical Corner Markers */
+        clip-path: polygon(
+            0 0, 100% 0, 
+            100% calc(100% - 15px), calc(100% - 15px) 100%, 
+            0 100%
+        );
+    }
+    
+    .hud-card::before {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; width: 3px; height: 100%;
+        background: linear-gradient(to bottom, #00f3ff, transparent);
+        opacity: 0.5;
+    }
+
+    /* --- UPLOAD ZONE --- */
+    [data-testid="stFileUploader"] {
+        border: 1px dashed #333;
+        background: rgba(0,0,0,0.3);
+        padding: 2rem;
+        border-radius: 4px;
+        transition: all 0.3s ease;
     }
     [data-testid="stFileUploader"]:hover {
-        border-color: #1a73e8; /* Blue border on hover */
+        border-color: #00f3ff;
+        background: rgba(0, 243, 255, 0.05);
     }
     [data-testid="stFileUploader"] section { background: transparent; }
+
+    /* --- TYPOGRAPHY UTILS --- */
+    .hud-title {
+        font-size: 3rem;
+        font-weight: 700;
+        background: linear-gradient(90deg, #fff, #999);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        letter-spacing: -0.05em;
+        line-height: 1;
+    }
+    .hud-subtitle {
+        color: #00f3ff;
+        font-family: 'JetBrains Mono', monospace !important;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.2em;
+        margin-bottom: 2rem;
+    }
     
-    /* 6. Streamlit Overrides */
-    section[data-testid="stSidebar"] { background-color: #ffffff; }
-    .stButton>button {
-        background-color: #1a73e8;
-        color: white;
-        border-radius: 4px;
-        padding: 8px 16px;
-        box-shadow: none;
-        transition: background-color 0.2s;
+    .label-small {
+        font-size: 0.7rem;
+        color: #666;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        font-family: 'JetBrains Mono', monospace !important;
+        margin-bottom: 0.5rem;
     }
-    .stButton>button:hover {
-        background-color: #1764c6;
+    
+    .value-big {
+        font-size: 2rem;
+        font-weight: 300;
+        color: #fff;
     }
+
+    /* --- ANIMATIONS --- */
+    @keyframes blink { 50% { opacity: 0.3; } }
+    .blink { animation: blink 2s infinite; }
+    
+    .glow-text {
+        text-shadow: 0 0 10px rgba(0, 243, 255, 0.5);
+    }
+
+    /* --- CUSTOM SCROLLBAR --- */
+    ::-webkit-scrollbar { width: 8px; background: #050505; }
+    ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #00f3ff; }
+
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 # =============================================================================
-# LOAD ARTIFACTS
+# SIDEBAR
 # =============================================================================
 idx_to_label, label_to_idx, label_json_path = load_label_map()
 model, grad_model, conv_name, model_path = load_model_and_gradcam()
+
+with st.sidebar:
+    st.markdown("### SYSTEM LOG")
+    st.code(
+        f"""
+        > INIT_SEQ... OK
+        > MODEL: {model_path.name if model_path else 'ERR'}
+        > SR: {SR} Hz
+        > FRAMES: {TARGET_FRAMES}
+        > STATUS: ONLINE
+        """, language="yaml"
+    )
+    st.markdown("---")
+    st.markdown("<div class='label-small' style='color:#444'>ARCHITECTURE</div>", unsafe_allow_html=True)
+    st.caption("Conv1D Stack / GlobalAvgPool / Softmax")
+
+if model is None or not idx_to_label:
+    st.error("CRITICAL FAILURE: Artifacts missing in `vocapra_project/`")
+    st.stop()
 
 # =============================================================================
 # MAIN LAYOUT
 # =============================================================================
 
 # Title Block
-st.markdown("<div class='material-title'>VOCAPRA Analytics Dashboard</div>", unsafe_allow_html=True)
-st.markdown("<div class='material-subtitle'>Acoustic Event Detection based on Material Design Principles</div>", unsafe_allow_html=True)
+st.markdown("<div class='hud-title'>VOCAPRA <span style='color:#00f3ff'>.AI</span></div>", unsafe_allow_html=True)
+st.markdown("<div class='hud-subtitle'>// Acoustic Event Recognition System v4.0</div>", unsafe_allow_html=True)
 
 # Top Section: Input & Status
-col1, col2 = st.columns([1.5, 1])
+c1, c2 = st.columns([1.5, 1])
 
-with col1:
-    st.markdown('<div class="material-card">', unsafe_allow_html=True)
-    st.markdown("<div class='metric-label-google'>1. Audio File Input (.WAV)</div>", unsafe_allow_html=True)
+with c1:
+    st.markdown("<div class='label-small'>INPUT STREAM</div>", unsafe_allow_html=True)
     uploaded = st.file_uploader("Upload WAV", type=["wav"], label_visibility="collapsed")
-    st.markdown('</div>', unsafe_allow_html=True)
 
-with col2:
+with c2:
+    num_classes = len(idx_to_label) if idx_to_label else 0
     st.markdown(
         f"""
-        <div class="material-card" style="padding: 1rem 1.5rem;">
+        <div class="hud-card">
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <div>
-                    <div class="metric-label-google">System Status</div>
-                    <div class="metric-value-google" style="color:#0f9d58; font-size:1.5rem;">Online</div>
+                    <div class="label-small">SYSTEM STATUS</div>
+                    <div style="color:#00f3ff; font-weight:bold;">● OPERATIONAL</div>
                 </div>
                 <div style="text-align:right;">
-                    <div class="metric-label-google">Classes</div>
-                    <div class="metric-value-google" style="font-size:1.5rem;">{len(idx_to_label) if idx_to_label else 0}</div>
+                    <div class="label-small">CLASSES</div>
+                    <div class="mono" style="font-size:1.5rem;">{num_classes:02d}</div>
                 </div>
             </div>
         </div>
@@ -192,37 +296,46 @@ with col2:
     )
 
 if uploaded is None:
-    # Stop execution here if no file is uploaded, but display the UI elements above
-    st.info("Upload an audio file to begin analysis.")
     st.stop()
 
+# =============================================================================
+# PROCESSING (Omitted for brevity in this block, as it is unchanged)
+# =============================================================================
+try:
+    y, sr = librosa.load(uploaded, sr=SR, mono=True)
+except Exception:
+    uploaded.seek(0)
+    data, sr_raw = sf.read(uploaded)
+    if data.ndim == 2: data = np.mean(data, axis=1)
+    y = librosa.resample(data, orig_sr=sr_raw, target_sr=SR)
+    sr = SR
 
-# --- Dummy inference and results for UI demonstration ---
-# In a real app, you'd replace the dummy values here with your actual inference logic.
-y = np.sin(np.linspace(0, 100, 16000)) # Dummy signal
-sr = SR
-fixed = np.random.rand(80, 39)
-pred_label = "GOAT_CALL"
-conf = 0.985
-probs = np.array([0.985, 0.010, 0.005])
+feats = compute_mfcc_with_deltas(y, sr=sr)
+fixed = to_fixed_frames(feats, TARGET_FRAMES)
+x_in = np.expand_dims(fixed, axis=0)
+probs = model.predict(x_in, verbose=0)[0]
+pred_idx = int(np.argmax(probs))
+pred_label = idx_to_label.get(pred_idx, str(pred_idx)).upper()
+conf = probs[pred_idx]
 
 # =============================================================================
 # RESULTS DISPLAY
 # =============================================================================
-st.markdown("## Analysis Results")
+st.write("")
+st.markdown(f"<div class='label-small blink'>Analyzing... COMPLETE</div>", unsafe_allow_html=True)
 
-# 1. Primary Result Card (Highlight)
+# 1. Primary Result Card (The "Hero" element)
 st.markdown(
     f"""
-    <div class="material-card" style="background-color: #e8f0fe; border-left: 5px solid #1a73e8;">
-        <div class="metric-label-google">Detected Event</div>
+    <div class="hud-card" style="border-left: 4px solid #bc13fe;">
+        <div class="label-small" style="color:#bc13fe;">PRIMARY DETECTION</div>
         <div style="display:flex; justify-content:space-between; align-items:flex-end;">
-            <div style="font-size: 3rem; font-weight: 500; color:#1a73e8;">
+            <div class="hud-title" style="font-size: 4rem; background: linear-gradient(to right, #fff, #bc13fe); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
                 {pred_label}
             </div>
             <div style="text-align:right;">
-                <div class="metric-label-google">Confidence</div>
-                <div style="font-size: 2rem; font-weight: 400; color:#3c4043;">{conf*100:.1f}%</div>
+                <div class="label-small">CONFIDENCE INTERVAL</div>
+                <div class="mono glow-text" style="font-size: 2rem; color:#fff;">{conf*100:05.2f}%</div>
             </div>
         </div>
     </div>
@@ -234,74 +347,83 @@ st.markdown(
 g1, g2 = st.columns([1.8, 1.2])
 
 with g1:
-    st.markdown('<div class="material-card">', unsafe_allow_html=True)
-    st.markdown("<div class='metric-label-google'>Signal Waveform</div>", unsafe_allow_html=True)
-    
-    fig, ax = plt.subplots(figsize=(8, 2.5))
-    fig.patch.set_facecolor('white')
-    ax.plot(np.linspace(0, len(y)/sr, len(y)), y, color='#1a73e8', linewidth=1.0)
-    style_material_plot(ax)
-    ax.set_yticks([]) # Hide Y axis ticks for cleaner look
+    st.markdown("<div class='hud-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='label-small'>SIGNAL OSCILLOSCOPE</div>", unsafe_allow_html=True)
+    fig = make_neon_plot(np.linspace(0, len(y)/sr, len(y)), y)
     st.pyplot(fig)
     plt.close(fig)
     st.markdown("</div>", unsafe_allow_html=True)
 
 with g2:
-    st.markdown('<div class="material-card">', unsafe_allow_html=True)
-    st.markdown("<div class='metric-label-google'>Probability Distribution</div>", unsafe_allow_html=True)
+    st.markdown("<div class='hud-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='label-small'>PROBABILITY DISTRIBUTION</div>", unsafe_allow_html=True)
     
-    # Custom Bar Chart
-    sorted_indices = np.argsort(probs)[::-1]
+    sorted_indices = np.argsort(probs)[::-1][:5]
     top_labels = [idx_to_label[i] for i in sorted_indices]
     top_vals = probs[sorted_indices]
     
-    fig, ax = plt.subplots(figsize=(5, 2.5))
-    fig.patch.set_facecolor('white')
+    fig, ax = plt.subplots(figsize=(5, 3))
+    fig.patch.set_alpha(0)
+    ax.patch.set_alpha(0)
     
-    bars = ax.barh(range(len(top_vals)), top_vals[::-1], color='#4285f4', height=0.6, alpha=0.9)
+    bars = ax.barh(range(len(top_vals)), top_vals[::-1], color='#bc13fe', height=0.5)
     
+    for i, rect in enumerate(bars):
+        width = rect.get_width()
+        ax.text(width + 0.05, rect.get_y() + rect.get_height()/2.0, 
+                f'{width:.2f}', ha='left', va='center', color='#bc13fe', fontsize=8, family='monospace')
+
     ax.set_yticks(range(len(top_vals)))
-    ax.set_yticklabels([l.replace('_', ' ').title() for l in top_labels[::-1]], color='#3c4043', fontsize=9)
-    style_material_plot(ax)
+    ax.set_yticklabels([l.upper() for l in top_labels[::-1]], color='#e0e0e0', fontfamily='monospace', fontsize=9)
+    
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
     ax.spines['left'].set_visible(False)
     ax.get_xaxis().set_visible(False)
+    
     st.pyplot(fig)
     plt.close(fig)
     st.markdown("</div>", unsafe_allow_html=True)
 
 # 3. Grad-CAM (Heatmap)
 if grad_model:
-    st.markdown("## Model Introspection")
-    st.markdown('<div class="material-card">', unsafe_allow_html=True)
-    st.markdown("<div class='metric-label-google'>Activation Map (Heatmap)</div>", unsafe_allow_html=True)
+    st.markdown("<div class='hud-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='label-small'>NEURAL ACTIVATION MAP [GRAD-CAM]</div>", unsafe_allow_html=True)
     
-    # Dummy CAM for light theme demonstration
-    cam = np.linspace(0, 1, fixed.shape[0]) 
-    
+    cam, _ = run_gradcam(grad_model, x_in)
     fig, ax = plt.subplots(figsize=(12, 3))
-    fig.patch.set_facecolor('white')
+    fig.patch.set_alpha(0)
+    ax.patch.set_alpha(0)
     
-    # Use Viridis/Plasma which works well for heatmaps on light backgrounds
-    im = ax.imshow(
-        np.tile(cam, (fixed.shape[1], 1)), 
-        origin="lower", 
-        aspect="auto", 
-        alpha=0.8, 
-        cmap='plasma'
-    )
+    ax.imshow(fixed.T, origin="lower", aspect="auto", cmap='ocean', alpha=0.2)
     
-    # Background MFCC features (subtle light gray)
-    ax.imshow(fixed.T, origin="lower", aspect="auto", cmap='gray', alpha=0.15)
+    extent = [0, fixed.shape[0], 0, fixed.shape[1]]
+    im = ax.imshow(np.tile(cam, (fixed.shape[1], 1)), origin="lower", aspect="auto", 
+                   alpha=0.8, cmap='inferno', extent=extent)
     
-    ax.set_facecolor('white')
+    ax.set_facecolor("none")
     ax.axis('off')
     
-    # Add a clean colorbar
-    cbar = plt.colorbar(im, ax=ax, fraction=0.03, pad=0.04)
-    cbar.ax.yaxis.set_tick_params(color='#555555')
-    plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='#555555')
-    cbar.outline.set_edgecolor('#dddddd')
+    ax.axhline(y=0, color='#333', linewidth=1)
     
     st.pyplot(fig)
     plt.close(fig)
     st.markdown("</div>", unsafe_allow_html=True)
+
+# =============================================================================
+# 🚨 COPYRIGHT FOOTER 🚨
+# =============================================================================
+
+# This line was replaced with the copyright notice:
+# st.markdown("<div class='mono' style='text-align: center; color: #333; font-size: 0.7rem; margin-top: 2rem;'>// END OF LINE //</div>", unsafe_allow_html=True)
+
+st.markdown("---") # Visual separator
+st.markdown(
+    """
+    <div class='mono' style='text-align: center; color: #666; font-size: 0.7rem; margin-top: 1rem; padding-bottom: 1rem;'>
+        &copy; 2025 Rights Reserved by BioQuantum Labs
+    </div>
+    """, 
+    unsafe_allow_html=True
+)
