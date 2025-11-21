@@ -2,10 +2,6 @@ streamlit
 tensorflow-cpu==2.15.0
 librosa==0.10.1
 soundfile
-numpy
+numpy==1.26.4
 scipy
 matplotlib
-protobuf<4
-numba
-pooch
-packaging
