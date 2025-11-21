@@ -1,16 +1,9 @@
-# Streamlit web UI
 streamlit
-
-# TensorFlow CPU build (sufficient for inference)
-tensorflow-cpu==2.15.0
-
-# Audio + signal processing
-librosa==0.10.1
-soundfile==0.12.1
-
-# Numeric stack (pinned so TF + librosa are happy)
-numpy<2.0
+tensorflow-cpu==2.16.1
+librosa==0.10.2.post1
+soundfile
+numpy<2.1
 scipy
-
-# Plotting
 matplotlib
+protobuf<4
+packaging
