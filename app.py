@@ -81,44 +81,35 @@ def load_label_map():
 
 def run_gradcam(grad_model, sample):
     """
-    sample: np.ndarray of shape (1, T, F)
-    Returns: (cam_resized (T,), class_idx (int))
+    Compute Grad-CAM for (1, T, F)
     """
-    sample_tf = tf.convert_to_tensor(sample)  # (1, T, F)
+    sample_tf = tf.convert_to_tensor(sample)
 
     with tf.GradientTape() as tape:
-        conv_outs, preds = grad_model(sample_tf)   # conv_outs: (1, T', C), preds: (1, C)
-
-        # Get scalar Python int for the predicted class
-        class_idx_tensor = tf.argmax(preds[0])     # Tensor()
-        class_idx = int(class_idx_tensor.numpy())  # plain int
-
-        # Use that int for slicing
-        loss = preds[:, class_idx]                 # (1,)
-
-    # Gradients wrt conv feature map
-    grads = tape.gradient(loss, conv_outs)         # (1, T', C)
-
-    # Global-average-pool over time
-    weights = tf.reduce_mean(grads, axis=1)        # (1, C)
-
-    # Weighted sum over channels
+        conv_outs, preds = grad_model(sample_tf)     # conv_outs: (1, T', C)
+        class_idx = tf.argmax(preds[0])              # scalar tensor
+        loss = preds[:, class_idx]                   # (1,)
+    
+    # Gradient of the loss with respect to conv layer
+    grads = tape.gradient(loss, conv_outs)           # (1, T', C)
+    weights = tf.reduce_mean(grads, axis=1)          # (1, C)
     cam = tf.reduce_sum(conv_outs * weights[:, tf.newaxis, :], axis=-1)  # (1, T')
-    cam = tf.nn.relu(cam)[0].numpy()              # (T',)
+    
+    cam = tf.nn.relu(cam).numpy()[0]                 # (T',)
 
-    # Normalize to [0,1]
+    # Normalize CAM across time
     cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-9)
 
-    # Resize CAM to match input time length T
+    # Resize to match input time frames
     T_in = sample.shape[1]
     T_cam = cam.shape[0]
     cam_resized = np.interp(
         np.linspace(0, T_cam - 1, T_in),
         np.arange(T_cam),
-        cam,
+        cam
     )
 
-    return cam_resized, class_idx
+    return cam_resized, int(class_idx.numpy())
 
 
 # =============================================================================
