@@ -81,35 +81,49 @@ def load_label_map():
 
 def run_gradcam(grad_model, sample):
     """
-    Compute Grad-CAM for (1, T, F)
+    Compute Grad-CAM for a single sample (shape: (1, T, F)).
+    Returns:
+        cam_resized: (T,) Grad-CAM weights over time
+        class_idx:   int, predicted class index
     """
-    sample_tf = tf.convert_to_tensor(sample)
+    sample_tf = tf.convert_to_tensor(sample)  # (1, T, F)
 
     with tf.GradientTape() as tape:
-        conv_outs, preds = grad_model(sample_tf)     # conv_outs: (1, T', C)
-        class_idx = tf.argmax(preds[0])              # scalar tensor
-        loss = preds[:, class_idx]                   # (1,)
-    
-    # Gradient of the loss with respect to conv layer
-    grads = tape.gradient(loss, conv_outs)           # (1, T', C)
-    weights = tf.reduce_mean(grads, axis=1)          # (1, C)
-    cam = tf.reduce_sum(conv_outs * weights[:, tf.newaxis, :], axis=-1)  # (1, T')
-    
-    cam = tf.nn.relu(cam).numpy()[0]                 # (T',)
+        conv_outs, preds = grad_model(sample_tf)
 
-    # Normalize CAM across time
+        # If model has multiple outputs, grab the last one as logits
+        if isinstance(preds, (list, tuple)):
+            preds_tensor = preds[-1]
+        else:
+            preds_tensor = preds  # shape (1, C)
+
+        # Get scalar Python int for predicted class
+        class_idx_tensor = tf.argmax(preds_tensor[0])   # shape () scalar
+        class_idx = int(class_idx_tensor.numpy())       # plain int
+
+        # Loss = logit of the predicted class
+        loss = preds_tensor[:, class_idx]               # shape (1,)
+
+    # Gradient w.r.t. conv feature map
+    grads = tape.gradient(loss, conv_outs)              # (1, T', C)
+    weights = tf.reduce_mean(grads, axis=1)             # (1, C)
+
+    cam = tf.reduce_sum(conv_outs * weights[:, tf.newaxis, :], axis=-1)  # (1, T')
+    cam = tf.nn.relu(cam).numpy()[0]                    # (T',)
+
+    # Normalize to [0, 1]
     cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-9)
 
-    # Resize to match input time frames
+    # Resize CAM to match input time axis T
     T_in = sample.shape[1]
     T_cam = cam.shape[0]
     cam_resized = np.interp(
         np.linspace(0, T_cam - 1, T_in),
         np.arange(T_cam),
-        cam
+        cam,
     )
+    return cam_resized, class_idx
 
-    return cam_resized, int(class_idx.numpy())
 
 
 # =============================================================================
