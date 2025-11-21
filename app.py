@@ -9,16 +9,20 @@ Elite UI for:
 - Showing class probabilities
 - Displaying Grad-CAM-like saliency over the feature map
 
-Make sure you have the artifacts from training:
+Expected artifacts (any of these names will be auto-detected):
+
   vocapra_project/best_model.h5
+  vocapra_project/best_model (1).h5
+
   vocapra_project/label_to_idx.json
+  vocapra_project/label_to_idx (1).json
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 
 import numpy as np
 import streamlit as st
@@ -35,8 +39,29 @@ HOP_LEN = 0.010
 TARGET_FRAMES = 80
 
 ARTIFACT_DIR = Path("vocapra_project")
-MODEL_PATH = ARTIFACT_DIR / "best_model.h5"
-LABEL_MAP_PATH = ARTIFACT_DIR / "label_to_idx.json"
+
+MODEL_CANDIDATES: List[str] = [
+    "best_model.h5",
+    "best_model (1).h5",
+    "best_model(1).h5",
+]
+
+LABEL_CANDIDATES: List[str] = [
+    "label_to_idx.json",
+    "label_to_idx (1).json",
+    "label_to_idx(1).json",
+]
+
+
+# ---------------------------------------------------------------
+# Helper: find first existing file among candidate names
+# ---------------------------------------------------------------
+def find_first_existing(candidates: List[str]) -> Optional[Path]:
+    for name in candidates:
+        p = ARTIFACT_DIR / name
+        if p.exists():
+            return p
+    return None
 
 
 # ----------------- FEATURE PIPELINE ----------------- #
@@ -78,10 +103,12 @@ def to_fixed_frames(seq: np.ndarray, target_frames: int = TARGET_FRAMES) -> np.n
 @st.cache_resource(show_spinner=False)
 def load_model_and_gradcam() -> Tuple[Optional[tf.keras.Model], Optional[tf.keras.Model], Optional[str]]:
     """Load Keras model and build grad_model (for last Conv1D layer)."""
-    if not MODEL_PATH.exists():
+
+    model_path = find_first_existing(MODEL_CANDIDATES)
+    if model_path is None:
         return None, None, None
 
-    model = tf.keras.models.load_model(MODEL_PATH)
+    model = tf.keras.models.load_model(model_path)
 
     # Find last Conv1D layer for Grad-CAM
     conv_layer_name = None
@@ -102,10 +129,13 @@ def load_model_and_gradcam() -> Tuple[Optional[tf.keras.Model], Optional[tf.kera
 
 @st.cache_resource(show_spinner=False)
 def load_label_map() -> Tuple[Dict[int, str], Dict[str, int]]:
-    """Load label_to_idx.json and also return idx_to_label."""
-    if not LABEL_MAP_PATH.exists():
+    """Load label_to_idx json and also return idx_to_label."""
+
+    label_path = find_first_existing(LABEL_CANDIDATES)
+    if label_path is None:
         return {}, {}
-    with open(LABEL_MAP_PATH, "r") as f:
+
+    with open(label_path, "r") as f:
         label_to_idx = json.load(f)
     idx_to_label = {int(v): k for k, v in label_to_idx.items()}
     return idx_to_label, label_to_idx
@@ -114,10 +144,12 @@ def load_label_map() -> Tuple[Dict[int, str], Dict[str, int]]:
 def run_gradcam(
     grad_model: tf.keras.Model,
     sample: np.ndarray,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, int]:
     """
     Compute Grad-CAM along time axis for a single sample (1, T, F).
-    Returns a 1D CAM of length T (aligned with input frames).
+    Returns:
+        cam_resized: 1D CAM of length T (aligned with input frames)
+        class_idx:   int class index used for Grad-CAM
     """
     sample_tf = tf.convert_to_tensor(sample)  # (1, T, F)
 
@@ -176,20 +208,20 @@ with st.sidebar:
     st.markdown(
         """
         **Model**  
-        • 1D Conv → BN → MaxPool (x2)  
+        • 1D Conv → BatchNorm → MaxPool (×2)  
         • GlobalAveragePooling → Dense softmax  
 
         **Features**  
         • MFCC (13) + Δ + Δ² = 39 dims  
-        • 16 kHz mono, 25 ms window, 10 ms hop.  
+        • 16 kHz mono, 25 ms window, 10 ms hop  
         • Fixed **80 frames** via right padding.
         """
     )
     st.markdown("---")
     st.info(
-        "Artifacts expected at:\n"
-        "`vocapra_project/best_model.h5`\n"
-        "`vocapra_project/label_to_idx.json`"
+        "Artifacts are searched under `vocapra_project/`:\n\n"
+        "• `best_model.h5` or `best_model (1).h5`\n"
+        "• `label_to_idx.json` or `label_to_idx (1).json`"
     )
 
 idx_to_label, label_to_idx = load_label_map()
@@ -198,8 +230,9 @@ model, grad_model, conv_name = load_model_and_gradcam()
 if model is None or not idx_to_label:
     st.error(
         "Model or label map not found.\n\n"
-        "Please upload/commit `vocapra_project/best_model.h5` and "
-        "`vocapra_project/label_to_idx.json` to the repo."
+        "Make sure you created a folder **vocapra_project/** in the repo and "
+        "uploaded **best_model.h5** (or `best_model (1).h5`) and "
+        "**label_to_idx.json** (or `label_to_idx (1).json`)."
     )
     st.stop()
 
@@ -238,7 +271,6 @@ duration = len(y) / sr
 st.success(f"Loaded audio: {duration:.2f} seconds @ {sr} Hz")
 
 with st.expander("🔊 Waveform preview", expanded=False):
-    # Show simple waveform
     t = np.linspace(0, duration, num=len(y))
     fig, ax = plt.subplots(figsize=(8, 2))
     ax.plot(t, y)
@@ -303,7 +335,6 @@ else:
     )
 
     fig, ax = plt.subplots(figsize=(8, 3))
-    # Show feature map (MFCC+Δ+Δ²)
     ax.imshow(fixed.T, origin="lower", aspect="auto")
     ax.imshow(
         np.tile(cam, (fixed.shape[1], 1)),
@@ -320,4 +351,6 @@ else:
     plt.close(fig)
 
 st.markdown("---")
-st.caption("Built with ❤️ on a tiny Conv1D VOCAPRA pipeline, ready for TFLite deployment.")
+st.caption(
+    "Built with ❤️ on a tiny Conv1D VOCAPRA pipeline, ready for TFLite deployment."
+)
