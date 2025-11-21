@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-VOCAPRA Streamlit App – Elite UI v3 (Fixed Layout & Theme)
+VOCAPRA Streamlit App – Elite UI v4 (Cyber-HUD Edition)
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import librosa
 import soundfile as sf
 import tensorflow as tf
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 
 # =============================================================================
 # CONFIG
@@ -93,147 +94,208 @@ def run_gradcam(grad_model, sample):
     cam_resized = np.interp(np.linspace(0, T_cam - 1, T_in), np.arange(T_cam), cam)
     return cam_resized, int(class_idx.numpy())
 
-def style_axis(ax):
+# =============================================================================
+# ELITE PLOTTING (NEON GLOW EFFECTS)
+# =============================================================================
+def make_neon_plot(x, y, color='#00f3ff', title="Waveform"):
+    """Creates a plot with a 'glow' effect by layering lines."""
+    fig, ax = plt.subplots(figsize=(8, 2.8))
+    fig.patch.set_alpha(0)
+    ax.patch.set_alpha(0)
+    
+    # The Core Line
+    ax.plot(x, y, color=color, linewidth=1.2, alpha=1.0)
+    
+    # The Glow Layers (Simulating bloom)
+    for n in range(1, 6):
+        ax.plot(x, y, color=color, linewidth=1.2 + n * 0.8, alpha=0.15 / n)
+
+    # Styling
     ax.set_facecolor("none")
-    ax.spines['bottom'].set_color('#cccccc')
-    ax.spines['left'].set_color('#cccccc') 
+    ax.spines['bottom'].set_color('#333333')
+    ax.spines['left'].set_visible(False)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    ax.tick_params(axis='both', colors='#cccccc', labelsize=9)
-    ax.yaxis.label.set_color('#cccccc')
-    ax.xaxis.label.set_color('#cccccc')
-    ax.title.set_color('#ffffff')
+    ax.tick_params(axis='x', colors='#666666', labelsize=8)
+    ax.set_yticks([]) # Hide Y axis ticks for clean look
+    ax.set_xlabel("TIME DOMAIN", color='#444444', fontfamily='monospace', fontsize=8)
+    
+    return fig
 
 # =============================================================================
-# STREAMLIT UI CONFIG
+# UI SETUP & CSS
 # =============================================================================
-st.set_page_config(page_title="VOCAPRA Explorer", page_icon="🐐", layout="wide")
+st.set_page_config(page_title="VOCAPRA HUD", page_icon="💠", layout="wide")
 
-# =============================================================================
-# CSS FIXES (Force Dark Mode & Widget Styling)
-# =============================================================================
 st.markdown(
     """
     <style>
-    /* 1. FORCE DARK BACKGROUND (Overrides Light Mode) */
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;500;700&family=JetBrains+Mono:wght@400;700&display=swap');
+
+    /* --- GLOBAL THEME --- */
     [data-testid="stAppViewContainer"] {
-        background: linear-gradient(145deg, #0f172a 0%, #1e1b4b 100%);
+        background-color: #030508;
+        background-image: 
+            radial-gradient(circle at 15% 50%, rgba(0, 243, 255, 0.08), transparent 25%),
+            radial-gradient(circle at 85% 30%, rgba(188, 19, 254, 0.08), transparent 25%);
+        color: #e0e0e0;
     }
-    [data-testid="stHeader"] {
-        background: rgba(0,0,0,0);
+    [data-testid="stHeader"] { background: transparent; }
+    
+    /* --- TYPOGRAPHY --- */
+    * { font-family: 'Space Grotesk', sans-serif !important; }
+    code, pre, .mono { font-family: 'JetBrains Mono', monospace !important; }
+    
+    /* --- HUD CARD DESIGN --- */
+    .hud-card {
+        background: rgba(10, 15, 25, 0.7);
+        border: 1px solid rgba(0, 243, 255, 0.15);
+        border-radius: 4px;
+        padding: 1.5rem;
+        position: relative;
+        backdrop-filter: blur(8px);
+        box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        margin-bottom: 1rem;
+        /* Technical Corner Markers */
+        clip-path: polygon(
+            0 0, 100% 0, 
+            100% calc(100% - 15px), calc(100% - 15px) 100%, 
+            0 100%
+        );
     }
     
-    /* 2. TYPOGRAPHY */
-    h1, h2, h3, p, span, div {
-        font-family: 'Inter', sans-serif;
-        color: #f8fafc !important;
+    .hud-card::before {
+        content: '';
+        position: absolute;
+        top: 0; left: 0; width: 3px; height: 100%;
+        background: linear-gradient(to bottom, #00f3ff, transparent);
+        opacity: 0.5;
     }
-    
-    /* 3. GRADIENT HEADER */
-    .gradient-text {
-        background: linear-gradient(to right, #2dd4bf, #38bdf8);
+
+    /* --- UPLOAD ZONE --- */
+    [data-testid="stFileUploader"] {
+        border: 1px dashed #333;
+        background: rgba(0,0,0,0.3);
+        padding: 2rem;
+        border-radius: 4px;
+        transition: all 0.3s ease;
+    }
+    [data-testid="stFileUploader"]:hover {
+        border-color: #00f3ff;
+        background: rgba(0, 243, 255, 0.05);
+    }
+    [data-testid="stFileUploader"] section { background: transparent; }
+
+    /* --- TYPOGRAPHY UTILS --- */
+    .hud-title {
+        font-size: 3rem;
+        font-weight: 700;
+        background: linear-gradient(90deg, #fff, #999);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
-        font-weight: 800;
-        font-size: 2.5rem;
-        color: transparent !important; /* Override global color */
+        letter-spacing: -0.05em;
+        line-height: 1;
     }
-
-    /* 4. GLASS CARD (Use for Pure Text/Metrics) */
-    .glass-card {
-        background: rgba(255, 255, 255, 0.04);
-        backdrop-filter: blur(10px);
-        -webkit-backdrop-filter: blur(10px);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 16px;
-        padding: 1.5rem;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+    .hud-subtitle {
+        color: #00f3ff;
+        font-family: 'JetBrains Mono', monospace !important;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.2em;
+        margin-bottom: 2rem;
     }
-
-    /* 5. STYLING THE NATIVE FILE UPLOADER (The Fix) */
-    /* This makes the standard uploader look like a glass card */
-    [data-testid="stFileUploader"] {
-        background: rgba(255, 255, 255, 0.04);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 16px;
-        padding: 1.5rem;
-        backdrop-filter: blur(10px);
-    }
-    /* Hide the default uploader borders to avoid double border */
-    [data-testid="stFileUploader"] section {
-        background-color: transparent;
-        border: 1px dashed rgba(255,255,255,0.2);
-    }
-    [data-testid="stFileUploader"] small {
-        color: #94a3b8 !important;
-    }
-
-    /* Metric Labels */
-    .metric-label {
-        font-size: 0.85rem;
+    
+    .label-small {
+        font-size: 0.7rem;
+        color: #666;
         text-transform: uppercase;
         letter-spacing: 0.1em;
-        color: #94a3b8 !important;
+        font-family: 'JetBrains Mono', monospace !important;
         margin-bottom: 0.5rem;
     }
-    .metric-value {
-        font-size: 1.8rem;
-        font-weight: 700;
+    
+    .value-big {
+        font-size: 2rem;
+        font-weight: 300;
+        color: #fff;
     }
-    .status-pill {
-        display: inline-block;
-        padding: 0.3rem 0.8rem;
-        border-radius: 99px;
-        font-size: 0.75rem;
-        font-weight: 600;
-        background: rgba(45, 212, 191, 0.15);
-        color: #2dd4bf !important;
-        border: 1px solid rgba(45, 212, 191, 0.3);
+
+    /* --- ANIMATIONS --- */
+    @keyframes blink { 50% { opacity: 0.3; } }
+    .blink { animation: blink 2s infinite; }
+    
+    .glow-text {
+        text-shadow: 0 0 10px rgba(0, 243, 255, 0.5);
     }
+
+    /* --- CUSTOM SCROLLBAR --- */
+    ::-webkit-scrollbar { width: 8px; background: #050505; }
+    ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #00f3ff; }
+
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 # =============================================================================
-# APP LOGIC
+# SIDEBAR
 # =============================================================================
 idx_to_label, label_to_idx, label_json_path = load_label_map()
 model, grad_model, conv_name, model_path = load_model_and_gradcam()
 
-# Header
-st.markdown('<div class="gradient-text">VOCAPRA Explorer</div>', unsafe_allow_html=True)
-st.markdown('<div style="margin-top: -10px; color: #94a3b8 !important;">Advanced Acoustic Event Detection</div>', unsafe_allow_html=True)
-st.write("") 
+with st.sidebar:
+    st.markdown("### SYSTEM LOG")
+    st.code(
+        f"""
+        > INIT_SEQ... OK
+        > MODEL: {model_path.name if model_path else 'ERR'}
+        > SR: {SR} Hz
+        > FRAMES: {TARGET_FRAMES}
+        > STATUS: ONLINE
+        """, language="yaml"
+    )
+    st.markdown("---")
+    st.markdown("<div class='label-small' style='color:#444'>ARCHITECTURE</div>", unsafe_allow_html=True)
+    st.caption("Conv1D Stack / GlobalAvgPool / Softmax")
 
-# ---- FIXED LAYOUT ----
-col1, col2 = st.columns([1.5, 1])
+if model is None or not idx_to_label:
+    st.error("CRITICAL FAILURE: Artifacts missing in `vocapra_project/`")
+    st.stop()
 
-with col1:
-    # WE DO NOT WRAP THE WIDGET IN HTML DIVS ANYMORE.
-    # The CSS above targets [data-testid="stFileUploader"] directly.
-    st.markdown('<div class="metric-label">1. AUDIO INPUT</div>', unsafe_allow_html=True)
-    uploaded = st.file_uploader("Drop WAV file", type=["wav"], label_visibility="collapsed")
+# =============================================================================
+# MAIN LAYOUT
+# =============================================================================
 
-with col2:
-    # Pure HTML works fine here because there are no interactive widgets
-    num_classes = len(idx_to_label) if idx_to_label else 0
+# Title Block
+st.markdown("<div class='hud-title'>VOCAPRA <span style='color:#00f3ff'>.AI</span></div>", unsafe_allow_html=True)
+st.markdown("<div class='hud-subtitle'>// Acoustic Event Recognition System v4.0</div>", unsafe_allow_html=True)
+
+# Top Section: Input & Status
+c1, c2 = st.columns([1.5, 1])
+
+with c1:
+    st.markdown("<div class='label-small'>INPUT STREAM</div>", unsafe_allow_html=True)
+    uploaded = st.file_uploader("Upload WAV", type=["wav"], label_visibility="collapsed")
+
+with c2:
     st.markdown(
         f"""
-        <div class="glass-card">
-            <div class="metric-label">SYSTEM STATUS</div>
-            <div class="metric-value">{num_classes} <span style="font-size:1rem; color:#64748b !important">classes</span></div>
-            <div style="height:0.5rem"></div>
-            <div class="status-pill">READY TO INFERENCE</div>
+        <div class="hud-card">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                    <div class="label-small">SYSTEM STATUS</div>
+                    <div style="color:#00f3ff; font-weight:bold;">● OPERATIONAL</div>
+                </div>
+                <div style="text-align:right;">
+                    <div class="label-small">CLASSES</div>
+                    <div class="mono" style="font-size:1.5rem;">{len(idx_to_label):02d}</div>
+                </div>
+            </div>
         </div>
-        """, 
+        """,
         unsafe_allow_html=True
     )
-
-# Artifact check
-if model is None or not idx_to_label:
-    st.error("⚠️ Artifacts missing. Please ensure `vocapra_project/` contains the model and labels.")
-    st.stop()
 
 if uploaded is None:
     st.stop()
@@ -250,32 +312,33 @@ except Exception:
     y = librosa.resample(data, orig_sr=sr_raw, target_sr=SR)
     sr = SR
 
+# Inference
 feats = compute_mfcc_with_deltas(y, sr=sr)
 fixed = to_fixed_frames(feats, TARGET_FRAMES)
 x_in = np.expand_dims(fixed, axis=0)
-
 probs = model.predict(x_in, verbose=0)[0]
 pred_idx = int(np.argmax(probs))
-pred_label = idx_to_label.get(pred_idx, str(pred_idx))
-confidence = probs[pred_idx]
+pred_label = idx_to_label.get(pred_idx, str(pred_idx)).upper()
+conf = probs[pred_idx]
 
 # =============================================================================
-# RESULTS UI
+# RESULTS DISPLAY
 # =============================================================================
-st.markdown("### Analysis Results")
+st.write("")
+st.markdown(f"<div class='label-small blink'>Analyzing... COMPLETE</div>", unsafe_allow_html=True)
 
-# Prediction Banner
+# 1. Primary Result Card (The "Hero" element)
 st.markdown(
     f"""
-    <div class="glass-card" style="border-left: 6px solid #2dd4bf; margin-bottom: 1rem;">
-        <div style="display:flex; justify-content:space-between; align-items:center;">
-            <div>
-                <div class="metric-label">DETECTED EVENT</div>
-                <div class="metric-value">{pred_label}</div>
+    <div class="hud-card" style="border-left: 4px solid #bc13fe;">
+        <div class="label-small" style="color:#bc13fe;">PRIMARY DETECTION</div>
+        <div style="display:flex; justify-content:space-between; align-items:flex-end;">
+            <div class="hud-title" style="font-size: 4rem; background: linear-gradient(to right, #fff, #bc13fe); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
+                {pred_label}
             </div>
             <div style="text-align:right;">
-                <div class="metric-label">CONFIDENCE</div>
-                <div class="metric-value">{confidence*100:.1f}%</div>
+                <div class="label-small">CONFIDENCE INTERVAL</div>
+                <div class="mono glow-text" style="font-size: 2rem; color:#fff;">{conf*100:05.2f}%</div>
             </div>
         </div>
     </div>
@@ -283,62 +346,81 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-c_wave, c_probs = st.columns([1.8, 1.2])
+# 2. Visualization Grid
+g1, g2 = st.columns([1.8, 1.2])
 
-with c_wave:
-    st.markdown('<div class="metric-label">SIGNAL WAVEFORM</div>', unsafe_allow_html=True)
-    # Styling the container for the plot
-    with st.container():
-        fig, ax = plt.subplots(figsize=(8, 2.5))
-        fig.patch.set_alpha(0)
-        ax.patch.set_alpha(0)
-        ax.plot(np.linspace(0, len(y)/sr, len(y)), y, color='#2dd4bf', linewidth=0.8, alpha=0.9)
-        style_axis(ax)
-        ax.set_xlabel("Time (s)")
-        ax.grid(color='white', alpha=0.05)
-        st.pyplot(fig)
-        plt.close(fig)
-
-with c_probs:
-    st.markdown('<div class="metric-label">CLASS PROBABILITIES</div>', unsafe_allow_html=True)
-    with st.container():
-        sorted_indices = np.argsort(probs)[::-1][:5]
-        top_labels = [idx_to_label[i] for i in sorted_indices]
-        top_vals = probs[sorted_indices]
-        
-        fig, ax = plt.subplots(figsize=(5, 2.5))
-        fig.patch.set_alpha(0)
-        ax.patch.set_alpha(0)
-        bars = ax.barh(range(len(top_vals)), top_vals[::-1], color='#38bdf8', alpha=0.8)
-        ax.set_yticks(range(len(top_vals)))
-        ax.set_yticklabels(top_labels[::-1], color='#e2e8f0')
-        style_axis(ax)
-        ax.set_xlabel("Probability")
-        ax.set_xlim(0, 1)
-        st.pyplot(fig)
-        plt.close(fig)
-
-st.markdown("### Model Introspection")
-# Wrap Grad-CAM in a glass container visually
-st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-st.markdown(f'<div class="metric-label">ACTIVATION MAP (Grad-CAM)</div>', unsafe_allow_html=True)
-
-if grad_model:
-    cam, _ = run_gradcam(grad_model, x_in)
-    fig, ax = plt.subplots(figsize=(12, 3.5))
-    fig.patch.set_alpha(0)
-    ax.patch.set_alpha(0)
-    ax.imshow(fixed.T, origin="lower", aspect="auto", cmap='gray', alpha=0.3)
-    extent = [0, fixed.shape[0], 0, fixed.shape[1]]
-    im = ax.imshow(np.tile(cam, (fixed.shape[1], 1)), origin="lower", aspect="auto", alpha=0.65, cmap='magma', extent=extent)
-    style_axis(ax)
-    ax.set_xlabel("Time Frames")
-    ax.set_ylabel("MFCC Coefficients")
-    cbar = plt.colorbar(im, ax=ax)
-    cbar.ax.yaxis.set_tick_params(color='#cccccc')
-    plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='#cccccc')
-    cbar.outline.set_edgecolor('#444444')
+with g1:
+    st.markdown("<div class='hud-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='label-small'>SIGNAL OSCILLOSCOPE</div>", unsafe_allow_html=True)
+    # Generate Neon Plot
+    fig = make_neon_plot(np.linspace(0, len(y)/sr, len(y)), y)
     st.pyplot(fig)
     plt.close(fig)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-st.markdown('</div>', unsafe_allow_html=True)
+with g2:
+    st.markdown("<div class='hud-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='label-small'>PROBABILITY DISTRIBUTION</div>", unsafe_allow_html=True)
+    
+    # Custom Bar Chart
+    sorted_indices = np.argsort(probs)[::-1][:5]
+    top_labels = [idx_to_label[i] for i in sorted_indices]
+    top_vals = probs[sorted_indices]
+    
+    fig, ax = plt.subplots(figsize=(5, 3))
+    fig.patch.set_alpha(0)
+    ax.patch.set_alpha(0)
+    
+    # Create gradient bars (simulated with solid colors for stability)
+    bars = ax.barh(range(len(top_vals)), top_vals[::-1], color='#bc13fe', height=0.5)
+    
+    # Add value labels at end of bars
+    for i, rect in enumerate(bars):
+        width = rect.get_width()
+        ax.text(width + 0.05, rect.get_y() + rect.get_height()/2.0, 
+                f'{width:.2f}', ha='left', va='center', color='#bc13fe', fontsize=8, family='monospace')
+
+    ax.set_yticks(range(len(top_vals)))
+    ax.set_yticklabels([l.upper() for l in top_labels[::-1]], color='#e0e0e0', fontfamily='monospace', fontsize=9)
+    
+    # Hide axis completely
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+    ax.get_xaxis().set_visible(False)
+    
+    st.pyplot(fig)
+    plt.close(fig)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# 3. Grad-CAM (Heatmap)
+if grad_model:
+    st.markdown("<div class='hud-card'>", unsafe_allow_html=True)
+    st.markdown("<div class='label-small'>NEURAL ACTIVATION MAP [GRAD-CAM]</div>", unsafe_allow_html=True)
+    
+    cam, _ = run_gradcam(grad_model, x_in)
+    fig, ax = plt.subplots(figsize=(12, 3))
+    fig.patch.set_alpha(0)
+    ax.patch.set_alpha(0)
+    
+    # Background Features (Dark Cyan)
+    ax.imshow(fixed.T, origin="lower", aspect="auto", cmap='ocean', alpha=0.2)
+    
+    # Activation (Inferno/Magma for high contrast neon look)
+    extent = [0, fixed.shape[0], 0, fixed.shape[1]]
+    im = ax.imshow(np.tile(cam, (fixed.shape[1], 1)), origin="lower", aspect="auto", 
+                   alpha=0.8, cmap='inferno', extent=extent)
+    
+    # Styling
+    ax.set_facecolor("none")
+    ax.axis('off') # Turn off all axis for clean graphic look
+    
+    # Add a thin white line at the bottom to ground it
+    ax.axhline(y=0, color='#333', linewidth=1)
+    
+    st.pyplot(fig)
+    plt.close(fig)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+st.markdown("<div class='mono' style='text-align: center; color: #333; font-size: 0.7rem; margin-top: 2rem;'>// END OF LINE //</div>", unsafe_allow_html=True)
