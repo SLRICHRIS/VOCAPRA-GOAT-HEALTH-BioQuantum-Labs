@@ -1,9 +1,14 @@
+# Streamlit UI
 streamlit
-tensorflow-cpu==2.16.1
-librosa==0.10.2.post1
+
+# TensorFlow (CPU-only) – works with Python 3.13
+tensorflow-cpu==2.20.0
+
+# Audio processing
+librosa==0.10.2
 soundfile
-numpy<2.1
+
+# Scientific stack
+numpy
 scipy
 matplotlib
-protobuf<4
-packaging
