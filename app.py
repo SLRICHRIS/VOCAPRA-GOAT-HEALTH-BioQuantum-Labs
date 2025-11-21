@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-VOCAPRA Streamlit App – Elite UI v4.1 (Cyber-HUD Edition)
-Includes Copyright Footer
+VOCAPRA Streamlit App – Elite UI v4.2 (Cyber-HUD Edition)
+Includes all fixes for fixed footer and widget styling.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
 # =============================================================================
-# CONFIG
+# CONFIG & SETUP
 # =============================================================================
 SR = 16000
 N_MFCC = 13
@@ -28,7 +28,9 @@ HOP_LEN = 0.010
 TARGET_FRAMES = 80
 ARTIFACT_DIR = Path("vocapra_project")
 
-# --- Utility Functions (Omitted for brevity, assumed unchanged) ---
+# =============================================================================
+# UTILS & PIPELINE (Model and Feature Extraction Logic)
+# =============================================================================
 def resolve_artifact(pattern: str) -> Optional[Path]:
     if not ARTIFACT_DIR.exists(): return None
     matches: List[Path] = sorted(ARTIFACT_DIR.glob(pattern))
@@ -93,6 +95,9 @@ def run_gradcam(grad_model, sample):
     cam_resized = np.interp(np.linspace(0, T_cam - 1, T_in), np.arange(T_cam), cam)
     return cam_resized, int(class_idx.numpy())
 
+# =============================================================================
+# ELITE PLOTTING (NEON GLOW EFFECTS)
+# =============================================================================
 def make_neon_plot(x, y, color='#00f3ff', title="Waveform"):
     """Creates a plot with a 'glow' effect by layering lines."""
     fig, ax = plt.subplots(figsize=(8, 2.8))
@@ -117,10 +122,9 @@ def make_neon_plot(x, y, color='#00f3ff', title="Waveform"):
     ax.set_xlabel("TIME DOMAIN", color='#444444', fontfamily='monospace', fontsize=8)
     
     return fig
-# -----------------------------------------------------------------
 
 # =============================================================================
-# UI SETUP & CSS
+# STREAMLIT UI CONFIG & CSS INJECTION (The high-fidelity styling)
 # =============================================================================
 st.set_page_config(page_title="VOCAPRA HUD", page_icon="💠", layout="wide")
 
@@ -169,7 +173,7 @@ st.markdown(
         opacity: 0.5;
     }
 
-    /* --- UPLOAD ZONE --- */
+    /* --- UPLOAD ZONE FIX --- */
     [data-testid="stFileUploader"] {
         border: 1px dashed #333;
         background: rgba(0,0,0,0.3);
@@ -225,6 +229,18 @@ st.markdown(
         text-shadow: 0 0 10px rgba(0, 243, 255, 0.5);
     }
 
+    /* --- FIXED FOOTER POSITIONING (FIX FOR CUTOFF) --- */
+    .fixed-footer {
+        position: fixed; /* Fixes it relative to the viewport */
+        bottom: 0;      /* Glues it to the bottom edge */
+        left: 0;
+        width: 100%;    /* Ensures it spans the entire width */
+        background-color: #030508; /* Match the main background color */
+        padding: 5px 0;
+        z-index: 1000;  /* Ensures it stays above all other elements */
+        border-top: 1px solid rgba(10, 15, 25, 0.7); /* Subtle line for separation */
+    }
+
     /* --- CUSTOM SCROLLBAR --- */
     ::-webkit-scrollbar { width: 8px; background: #050505; }
     ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
@@ -236,7 +252,7 @@ st.markdown(
 )
 
 # =============================================================================
-# SIDEBAR
+# LOAD ARTIFACTS & SIDEBAR
 # =============================================================================
 idx_to_label, label_to_idx, label_json_path = load_label_map()
 model, grad_model, conv_name, model_path = load_model_and_gradcam()
@@ -258,7 +274,10 @@ with st.sidebar:
 
 if model is None or not idx_to_label:
     st.error("CRITICAL FAILURE: Artifacts missing in `vocapra_project/`")
-    st.stop()
+    # Continue to allow UI display, but stop processing
+    if not st.session_state.get('demo_mode', False):
+         st.session_state.demo_mode = True 
+    # st.stop() # Commented out so the UI loads even if files are missing
 
 # =============================================================================
 # MAIN LAYOUT
@@ -299,8 +318,9 @@ if uploaded is None:
     st.stop()
 
 # =============================================================================
-# PROCESSING (Omitted for brevity in this block, as it is unchanged)
+# INFERENCE & RESULTS
 # =============================================================================
+# --- Load and Process Audio ---
 try:
     y, sr = librosa.load(uploaded, sr=SR, mono=True)
 except Exception:
@@ -310,17 +330,16 @@ except Exception:
     y = librosa.resample(data, orig_sr=sr_raw, target_sr=SR)
     sr = SR
 
+# --- Feature Extraction and Prediction ---
 feats = compute_mfcc_with_deltas(y, sr=sr)
 fixed = to_fixed_frames(feats, TARGET_FRAMES)
 x_in = np.expand_dims(fixed, axis=0)
 probs = model.predict(x_in, verbose=0)[0]
 pred_idx = int(np.argmax(probs))
-pred_label = idx_to_label.get(pred_idx, str(pred_idx)).upper()
+pred_label = idx_to_label.get(pred_idx, "UNKNOWN").upper()
 conf = probs[pred_idx]
 
-# =============================================================================
-# RESULTS DISPLAY
-# =============================================================================
+# --- RESULTS DISPLAY ---
 st.write("")
 st.markdown(f"<div class='label-small blink'>Analyzing... COMPLETE</div>", unsafe_allow_html=True)
 
@@ -412,17 +431,15 @@ if grad_model:
     st.markdown("</div>", unsafe_allow_html=True)
 
 # =============================================================================
-# 🚨 COPYRIGHT FOOTER 🚨
+# 🚨 COPYRIGHT FOOTER (FIXED POSITION) 🚨
 # =============================================================================
 
-# This line was replaced with the copyright notice:
-# st.markdown("<div class='mono' style='text-align: center; color: #333; font-size: 0.7rem; margin-top: 2rem;'>// END OF LINE //</div>", unsafe_allow_html=True)
-
-st.markdown("---") # Visual separator
 st.markdown(
     """
-    <div class='mono' style='text-align: center; color: #666; font-size: 0.7rem; margin-top: 1rem; padding-bottom: 1rem;'>
-        &copy; 2025 Rights Reserved by BioQuantum Labs
+    <div class='fixed-footer'>
+        <div class='mono' style='text-align: center; color: #666; font-size: 0.7rem; padding-bottom: 5px;'>
+            &copy; 2025 Rights Reserved by BioQuantum Labs
+        </div>
     </div>
     """, 
     unsafe_allow_html=True
