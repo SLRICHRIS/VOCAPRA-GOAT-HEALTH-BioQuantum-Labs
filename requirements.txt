@@ -1,14 +1,8 @@
-# Streamlit UI
 streamlit
-
-# TensorFlow (CPU-only) – works with Python 3.13
 tensorflow-cpu==2.20.0
-
-# Audio processing
 librosa==0.10.2
 soundfile
-
-# Scientific stack
 numpy
 scipy
 matplotlib
+plotly
