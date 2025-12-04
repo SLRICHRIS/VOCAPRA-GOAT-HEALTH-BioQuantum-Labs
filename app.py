@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 VOCAPRA Streamlit App – Elite UI v1.O (Cyber-HUD Edition)
-Full file including research-grade evaluation machinery (confusion matrix, per-class metrics, PR/ROC hooks).
+Fully corrected single-file app with safe Grad-CAM and research-grade evaluation.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import soundfile as sf
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import seaborn as sns
+import pandas as pd
 
 from sklearn.metrics import (
     accuracy_score,
@@ -293,6 +294,7 @@ st.markdown(
             radial-gradient(circle at 15% 50%, rgba(0, 243, 255, 0.08), transparent 25%),
             radial-gradient(circle at 85% 30%, rgba(188, 19, 254, 0.08), transparent 25%);
         color: #e0e0e0;
+        min-height: 100vh;
     }
     [data-testid="stHeader"] { background: transparent; }
 
@@ -370,6 +372,11 @@ st.markdown(
         text-shadow: 0 0 10px rgba(0, 243, 255, 0.5);
     }
 
+    /* Ensure there is padding at bottom so evaluation block won't be hidden */
+    .block-container {
+        padding-bottom: 220px !important;
+    }
+
     .fixed-footer {
         position: fixed;
         bottom: 0;
@@ -377,7 +384,7 @@ st.markdown(
         width: 100%;
         background-color: #030508;
         padding: 5px 0;
-        z-index: 1000;
+        z-index: 200;
         border-top: 1px solid rgba(10, 15, 25, 0.7);
         pointer-events: none;
     }
@@ -579,34 +586,56 @@ with g2:
     plt.close(fig)
     st.markdown("</div>", unsafe_allow_html=True)
 
-# Grad-CAM visualization
-if grad_model and model is not None:
-    st.markdown("<div class='hud-card'>", unsafe_allow_html=True)
-    st.markdown("<div class='label-small'>NEURAL ACTIVATION MAP [GRAD-CAM]</div>", unsafe_allow_html=True)
+# =============================================================================
+# SAFE GRAD-CAM VISUALIZATION (No overflow, no hidden UI)
+# =============================================================================
+st.markdown("<div class='hud-card'>", unsafe_allow_html=True)
+st.markdown("<div class='label-small'>NEURAL ACTIVATION MAP [GRAD-CAM]</div>", unsafe_allow_html=True)
 
+if grad_model and model is not None:
     with st.spinner("Generating activation map..."):
         cam, _ = run_gradcam(grad_model, x_in)
 
     if cam is not None:
-        fig, ax = plt.subplots(figsize=(12, 3))
+        # Safe plotting: NO extent, NO auto expansion
+        fig, ax = plt.subplots(figsize=(10, 2.5))
         fig.patch.set_alpha(0)
         ax.patch.set_alpha(0)
 
-        ax.imshow(fixed.T, origin="lower", aspect="auto", cmap='ocean', alpha=0.2)
-        extent = [0, fixed.shape[0], 0, fixed.shape[1]]
-        im = ax.imshow(np.tile(cam, (fixed.shape[1], 1)), origin="lower", aspect="auto",
-                       alpha=0.8, cmap='inferno', extent=extent)
-        ax.set_facecolor("none")
-        ax.axis('off')
-        ax.axhline(y=0, color='#333', linewidth=1)
+        # Base feature map
+        ax.imshow(
+            fixed.T,
+            origin="lower",
+            aspect="auto",
+            cmap="ocean",
+            alpha=0.25
+        )
 
+        # Grad-CAM overlay
+        cam_img = np.tile(cam, (fixed.shape[1], 1))
+        ax.imshow(
+            cam_img,
+            origin="lower",
+            aspect="auto",
+            cmap="inferno",
+            alpha=0.75
+        )
+
+        # Force boundaries to avoid blank overflow region
+        ax.set_xlim(0, fixed.shape[0])
+        ax.set_ylim(0, fixed.shape[1])
+
+        ax.axis("off")
+
+        fig.tight_layout(pad=0.1)
         st.pyplot(fig)
         plt.close(fig)
     else:
         st.info("Grad-CAM not available for this model configuration.")
-    st.markdown("</div>", unsafe_allow_html=True)
 else:
-    st.info("Grad-CAM not available (missing conv layer or model artifact).")
+    st.info("Grad-CAM not available (missing model or conv layer).")
+
+st.markdown("</div>", unsafe_allow_html=True)
 
 # =============================================================================
 # EVALUATION UI
@@ -633,8 +662,8 @@ if run_eval:
 
         if "error" in eval_out:
             st.error(eval_out["error"])
-            if eval_out.get("missing", None):
-                st.info(f"Missing folders: {eval_out.get('missing')}")
+            if eval_out.get("missing_folders"):
+                st.info(f"Missing folders: {eval_out.get('missing_folders')}")
         else:
             st.success("Evaluation complete!")
 
@@ -648,16 +677,10 @@ if run_eval:
             # Per-class table (report)
             st.markdown("### Per-Class Precision / Recall / F1-Score")
             report = eval_out["report"]
-            # Convert report dict to table-friendly format
-            try:
-                import pandas as pd
-                df_report = pd.DataFrame(report).T
-                # show support, precision, recall, f1-score
-                cols = ["precision", "recall", "f1-score", "support"]
-                cols = [c for c in cols if c in df_report.columns]
-                st.dataframe(df_report[cols].sort_index(ascending=True))
-            except Exception:
-                st.write(report)
+            df_report = pd.DataFrame(report).T
+            # Filter to core metrics if available
+            cols = [c for c in ["precision", "recall", "f1-score", "support"] if c in df_report.columns]
+            st.dataframe(df_report[cols].sort_index(ascending=True))
 
             # Confusion Matrix
             st.markdown("### Confusion Matrix")
@@ -679,22 +702,13 @@ if run_eval:
             ax.bar(classes, f1_scores, color='#00f3ff')
             ax.set_ylabel("F1 Score")
             plt.xticks(rotation=45, ha='right')
-            st.ylim(0, 1.0)
+            ax.set_ylim(0, 1.0)
             st.pyplot(fig)
             plt.close(fig)
 
-            # Optionally show full classification report text
-            st.markdown("### Full Classification Report (text)")
-            try:
-                import pandas as pd
-                st.text(classification_report(
-                    sum([[lbl]*int(eval_out["support"][i]) for i, lbl in enumerate(labels)], []),
-                    # Reconstructing preds would be complex; instead show report dict as pretty JSON
-                    {}
-                ))
-            except Exception:
-                # Fallback: show JSON report
-                st.json(report)
+            # Full classification report as JSON
+            st.markdown("### Full Classification Report (JSON)")
+            st.json(report)
 
 # =============================================================================
 # COPYRIGHT FOOTER
