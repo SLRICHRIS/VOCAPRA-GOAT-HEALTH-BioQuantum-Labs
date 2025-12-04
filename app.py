@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-VOCAPRA Streamlit App – Elite UI v1.O (Cyber-HUD Edition) — Corrected single-file version
+VOCAPRA Streamlit App – Elite UI v1.O (Cyber-HUD Edition) — Full version with Evaluation Engine
 
-Key fixes included:
-- Guarded model prediction when model artifact missing
-- Reset uploaded file pointer before reads
-- Load Keras model with compile=False to reduce overhead
-- Safer Grad-CAM handling (guards when conv layer not found)
-- Added st.audio playback of uploaded sample
-- Spinner during heavy ops (inference / gradcam)
-- Minor CSS improvements (footer pointer-events) to avoid blocking interactions
-- Friendly demo fallback when artifacts are missing
+Features:
+- Robust model & label loading with demo fallback
+- MFCC + delta + delta-delta feature extraction
+- Fixed-frame padding for model input
+- Grad-CAM visualisation (guarded)
+- Neon HUD visuals + CSS
+- Research-grade evaluation (per-class precision/recall/F1, confusion matrix, PR/ROC optional)
+- Test dataset folder evaluation with downloadable CSV report
 """
 
 from __future__ import annotations
@@ -21,11 +20,20 @@ from pathlib import Path
 from typing import Dict, Tuple, Optional, List
 
 import numpy as np
+import pandas as pd
 import streamlit as st
 import librosa
 import soundfile as sf
 import tensorflow as tf
 import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.metrics import (
+    accuracy_score,
+    precision_recall_fscore_support,
+    confusion_matrix,
+    classification_report
+)
 
 # =============================================================================
 # CONFIG & SETUP
@@ -76,16 +84,13 @@ def load_model_and_gradcam():
         return None, None, None, None
 
     try:
-        # load model without compilation to avoid unnecessary overhead
         model = tf.keras.models.load_model(model_path, compile=False)
     except Exception as e:
         st.error(f"Failed to load model: {e}")
         return None, None, None, None
 
     conv_layer_name = None
-    # find the last Conv1D-like layer
     for layer in reversed(model.layers):
-        # handle built-in Conv1D or name containing 'conv'
         if isinstance(layer, tf.keras.layers.Conv1D) or "conv" in layer.name.lower():
             conv_layer_name = layer.name
             break
@@ -94,14 +99,7 @@ def load_model_and_gradcam():
     if conv_layer_name is not None:
         try:
             conv_out = model.get_layer(conv_layer_name).output
-            # Try to use logits if they exist (pre-softmax). Fallback to model.output.
-            # If the model's final activations are softmax, logits may not be directly available.
-            logits_output = None
-            # Attempt to find the layer right before the final activation
-            if isinstance(model.output, (list, tuple)):
-                logits_output = model.output[-1]
-            else:
-                logits_output = model.output
+            logits_output = model.output
             grad_model = tf.keras.models.Model(inputs=model.inputs, outputs=[conv_out, logits_output])
         except Exception:
             grad_model = None
@@ -112,14 +110,12 @@ def load_model_and_gradcam():
 def load_label_map():
     json_path = resolve_artifact("label_to_idx*.json")
     if json_path is None:
-        # fallback minimal mapping so UI doesn't blow up
         idx_to_label = {0: "UNKNOWN"}
         label_to_idx = {"UNKNOWN": 0}
         return idx_to_label, label_to_idx, None
     try:
         with open(json_path, "r") as f:
             label_to_idx = json.load(f)
-        # invert mapping (stored label->idx assumed)
         idx_to_label = {int(v): k for k, v in label_to_idx.items()}
         return idx_to_label, label_to_idx, json_path
     except Exception:
@@ -143,32 +139,25 @@ def run_gradcam(grad_model, sample):
         with tf.GradientTape() as tape:
             conv_outs, preds = grad_model(sample_tf)
 
-            # preds might be logits or probabilities; ensure tensor
             if isinstance(preds, (list, tuple)):
                 preds_tensor = preds[-1]
             else:
                 preds_tensor = preds  # shape (1, C)
 
-            # Predicted class index (plain int)
             class_idx_tensor = tf.argmax(preds_tensor[0])
             class_idx = int(class_idx_tensor.numpy())
 
-            # Use the logit (pre-softmax) value for the predicted class as loss
             loss = preds_tensor[:, class_idx]  # shape (1,)
-            # Gradient w.r.t. conv feature map
             grads = tape.gradient(loss, conv_outs)  # (1, T', C)
             if grads is None:
                 return None, class_idx
 
-            # channel-wise mean of gradients
             weights = tf.reduce_mean(grads, axis=1)  # (1, C)
             cam = tf.reduce_sum(conv_outs * weights[:, tf.newaxis, :], axis=-1)  # (1, T')
             cam = tf.nn.relu(cam).numpy()[0]  # (T',)
 
-            # Normalize robustly
             cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-9)
 
-            # Resize CAM to match input time axis T
             T_in = int(sample.shape[1])
             T_cam = cam.shape[0]
             cam_resized = np.interp(
@@ -182,35 +171,107 @@ def run_gradcam(grad_model, sample):
         return None, 0
 
 # =============================================================================
+# EVALUATION ENGINE
+# =============================================================================
+def evaluate_model_on_folder(model, idx_to_label, test_dir: str = "vocapra_project/test_audio"):
+    """
+    Expects folder structure:
+    test_audio/
+        CLASS_A/
+            a1.wav
+            a2.wav
+        CLASS_B/
+            ...
+    Returns dict with metrics and confusion matrix.
+    """
+    label_order = sorted(list(set(idx_to_label.values())))
+    true_labels = []
+    pred_labels = []
+
+    test_root = Path(test_dir)
+    if not test_root.exists():
+        raise FileNotFoundError(f"Test directory not found: {test_dir}")
+
+    # iterate each class folder (use label_order for predictable ordering)
+    for class_name in label_order:
+        class_folder = test_root / class_name
+        if not class_folder.exists():
+            continue
+        for wav_file in sorted(class_folder.glob("*.wav")):
+            try:
+                y, _ = librosa.load(wav_file, sr=SR, mono=True)
+            except Exception:
+                try:
+                    data, sr_raw = sf.read(wav_file)
+                    if data.ndim == 2:
+                        data = np.mean(data, axis=1)
+                    y = librosa.resample(np.asarray(data, dtype=np.float32), orig_sr=sr_raw, target_sr=SR)
+                except Exception:
+                    continue
+
+            feats = compute_mfcc_with_deltas(y, sr=SR)
+            fx = to_fixed_frames(feats)
+            x_in = np.expand_dims(fx, 0)
+            try:
+                preds = model.predict(x_in, verbose=0)
+                if isinstance(preds, (list, tuple)):
+                    preds = preds[-1]
+                pred_idx = int(np.argmax(preds[0]))
+                pred_label = idx_to_label.get(pred_idx, "UNKNOWN")
+            except Exception:
+                pred_label = "UNKNOWN"
+
+            true_labels.append(class_name)
+            pred_labels.append(pred_label)
+
+    if len(true_labels) == 0:
+        raise ValueError("No test samples found or readable in the provided test directory.")
+
+    # Compute metrics
+    acc = accuracy_score(true_labels, pred_labels)
+    precision, recall, f1, support = precision_recall_fscore_support(
+        true_labels, pred_labels, labels=label_order, zero_division=0
+    )
+    report = classification_report(
+        true_labels, pred_labels, labels=label_order, zero_division=0, output_dict=True
+    )
+    cm = confusion_matrix(true_labels, pred_labels, labels=label_order)
+
+    return {
+        "accuracy": acc,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "support": support,
+        "report": report,
+        "cm": cm,
+        "labels": label_order,
+        "true_labels": true_labels,
+        "pred_labels": pred_labels
+    }
+
+# =============================================================================
 # ELITE PLOTTING (NEON GLOW EFFECTS)
 # =============================================================================
 def make_neon_plot(x, y, color='#00f3ff', title="Waveform"):
-    """Creates a plot with a 'glow' effect by layering lines."""
     fig, ax = plt.subplots(figsize=(8, 2.8))
     fig.patch.set_alpha(0)
     ax.patch.set_alpha(0)
-
-    # The Core Line
     ax.plot(x, y, color=color, linewidth=1.2, alpha=1.0)
-
-    # The Glow Layers (Simulating bloom)
     for n in range(1, 6):
         ax.plot(x, y, color=color, linewidth=1.2 + n * 0.8, alpha=0.15 / n)
-
-    # Styling
     ax.set_facecolor("none")
     ax.spines['bottom'].set_color('#333333')
     ax.spines['left'].set_visible(False)
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.tick_params(axis='x', colors='#666666', labelsize=8)
-    ax.set_yticks([])  # Hide Y axis ticks for clean look
+    ax.set_yticks([])
     ax.set_xlabel("TIME DOMAIN", color='#444444', fontfamily='monospace', fontsize=8)
-
     return fig
 
 # =============================================================================
-# STREAMLIT UI CONFIG & CSS INJECTION (The high-fidelity styling)
+# STREAMLIT UI CONFIG & CSS
 # =============================================================================
 st.set_page_config(page_title="VOCAPRA HUD", page_icon="💠", layout="wide")
 
@@ -219,7 +280,6 @@ st.markdown(
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;500;700&family=JetBrains+Mono:wght@400;700&display=swap');
 
-    /* --- GLOBAL THEME --- */
     [data-testid="stAppViewContainer"] {
         background-color: #030508;
         background-image: 
@@ -229,11 +289,9 @@ st.markdown(
     }
     [data-testid="stHeader"] { background: transparent; }
 
-    /* --- TYPOGRAPHY --- */
     * { font-family: 'Space Grotesk', sans-serif !important; }
     code, pre, .mono { font-family: 'JetBrains Mono', monospace !important; }
 
-    /* --- HUD CARD DESIGN --- */
     .hud-card {
         background: rgba(10, 15, 25, 0.7);
         border: 1px solid rgba(0, 243, 255, 0.15);
@@ -258,7 +316,6 @@ st.markdown(
         opacity: 0.5;
     }
 
-    /* --- UPLOAD ZONE FIX --- */
     [data-testid="stFileUploader"] {
         border: 1px dashed #333;
         background: rgba(0,0,0,0.3);
@@ -272,7 +329,6 @@ st.markdown(
     }
     [data-testid="stFileUploader"] section { background: transparent; }
 
-    /* --- TYPOGRAPHY UTILS --- */
     .hud-title {
         font-size: 3rem;
         font-weight: 700;
@@ -306,7 +362,6 @@ st.markdown(
         color: #fff;
     }
 
-    /* --- ANIMATIONS --- */
     @keyframes blink { 50% { opacity: 0.3; } }
     .blink { animation: blink 2s infinite; }
 
@@ -314,7 +369,6 @@ st.markdown(
         text-shadow: 0 0 10px rgba(0, 243, 255, 0.5);
     }
 
-    /* --- FIXED FOOTER POSITIONING (FIX FOR CUTOFF) --- */
     .fixed-footer {
         position: fixed;
         bottom: 0;
@@ -324,15 +378,13 @@ st.markdown(
         padding: 5px 0;
         z-index: 1000;
         border-top: 1px solid rgba(10, 15, 25, 0.7);
-        pointer-events: none; /* avoid blocking mobile touches */
+        pointer-events: none;
     }
     .fixed-footer * { pointer-events: auto; }
 
-    /* --- CUSTOM SCROLLBAR --- */
     ::-webkit-scrollbar { width: 8px; background: #050505; }
     ::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
     ::-webkit-scrollbar-thumb:hover { background: #00f3ff; }
-
     </style>
     """,
     unsafe_allow_html=True,
@@ -357,7 +409,7 @@ with st.sidebar:
     )
     st.markdown("---")
     st.markdown("<div class='label-small' style='color:#444'>ARCHITECTURE</div>", unsafe_allow_html=True)
-    st.caption("Conv1D Stack / GlobalAvgPool / Softmax")
+    st.caption("Conv1D Stack / GlobalAvgPool / Softmax (approx.)")
 
 if model is None or not idx_to_label:
     st.warning("Some artifacts are missing from `vocapra_project/`. App will run in demo mode with fallback outputs.")
@@ -367,12 +419,9 @@ if model is None or not idx_to_label:
 # =============================================================================
 # MAIN LAYOUT
 # =============================================================================
-
-# Title Block
 st.markdown("<div class='hud-title'>VOCAPRA <span style='color:#00f3ff'>.AI</span></div>", unsafe_allow_html=True)
 st.markdown("<div class='hud-subtitle'>// Acoustic Event Recognition System v4.0</div>", unsafe_allow_html=True)
 
-# Top Section: Input & Status
 c1, c2 = st.columns([1.5, 1])
 
 with c1:
@@ -402,18 +451,16 @@ with c2:
 if uploaded is None:
     st.stop()
 
-# play uploaded audio
+# Playback
 try:
     uploaded.seek(0)
     st.audio(uploaded.getvalue(), format='audio/wav')
 except Exception:
-    # best-effort; ignore playback failure
     pass
 
 # =============================================================================
 # INFERENCE & RESULTS
 # =============================================================================
-# --- Load and Process Audio (robust strategy) ---
 try:
     uploaded.seek(0)
     y, sr = librosa.load(uploaded, sr=SR, mono=True)
@@ -429,16 +476,13 @@ except Exception:
         st.error(f"Failed to read uploaded audio: {e}")
         st.stop()
 
-# --- Feature Extraction and Prediction ---
 feats = compute_mfcc_with_deltas(y, sr=sr)
 fixed = to_fixed_frames(feats, TARGET_FRAMES)
 x_in = np.expand_dims(fixed, axis=0)
 
-# Prediction with safety guards + spinner
 probs = None
 pred_idx = 0
 if model is None:
-    # demo fallback: uniform weak probabilities with a single strong class
     num = len(idx_to_label) or 3
     probs = np.zeros(num, dtype=float)
     probs[0] = 1.0
@@ -447,7 +491,6 @@ else:
     try:
         with st.spinner("Running inference..."):
             preds = model.predict(x_in, verbose=0)
-            # model.predict may return (1, C) or list
             if isinstance(preds, (list, tuple)):
                 preds = preds[-1]
             probs = np.array(preds[0], dtype=float)
@@ -462,11 +505,10 @@ else:
 pred_label = idx_to_label.get(pred_idx, "UNKNOWN").upper()
 conf = float(probs[pred_idx]) if probs is not None and len(probs) > pred_idx else 0.0
 
-# --- RESULTS DISPLAY ---
 st.write("")
 st.markdown(f"<div class='label-small blink'>Analyzing... COMPLETE</div>", unsafe_allow_html=True)
 
-# 1. Primary Result Card (The "Hero" element)
+# Primary detection card
 st.markdown(
     f"""
     <div class="hud-card" style="border-left: 4px solid #bc13fe;">
@@ -485,7 +527,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# 2. Visualization Grid
+# Visualization grid
 g1, g2 = st.columns([1.8, 1.2])
 
 with g1:
@@ -500,10 +542,8 @@ with g2:
     st.markdown("<div class='hud-card'>", unsafe_allow_html=True)
     st.markdown("<div class='label-small'>PROBABILITY DISTRIBUTION</div>", unsafe_allow_html=True)
 
-    # ensure probs length matches idx map
     if probs is None:
         probs = np.zeros(len(idx_to_label) or 1, dtype=float)
-    # safe selection of top-k
     top_k = min(5, len(probs))
     sorted_indices = np.argsort(probs)[::-1][:top_k]
     top_labels = [idx_to_label.get(i, "UNKNOWN") for i in sorted_indices]
@@ -514,7 +554,6 @@ with g2:
     ax.patch.set_alpha(0)
 
     bars = ax.barh(range(len(top_vals)), top_vals[::-1], color='#bc13fe', height=0.5)
-
     for i, rect in enumerate(bars):
         width = rect.get_width()
         ax.text(width + 0.05, rect.get_y() + rect.get_height() / 2.0,
@@ -533,7 +572,7 @@ with g2:
     plt.close(fig)
     st.markdown("</div>", unsafe_allow_html=True)
 
-# 3. Grad-CAM (Heatmap) — guarded
+# Grad-CAM
 if grad_model and model is not None:
     st.markdown("<div class='hud-card'>", unsafe_allow_html=True)
     st.markdown("<div class='label-small'>NEURAL ACTIVATION MAP [GRAD-CAM]</div>", unsafe_allow_html=True)
@@ -547,14 +586,12 @@ if grad_model and model is not None:
         ax.patch.set_alpha(0)
 
         ax.imshow(fixed.T, origin="lower", aspect="auto", cmap='ocean', alpha=0.2)
-
         extent = [0, fixed.shape[0], 0, fixed.shape[1]]
-        im = ax.imshow(np.tile(cam, (fixed.shape[1], 1)), origin="lower", aspect="auto",
-                       alpha=0.8, cmap='inferno', extent=extent)
+        ax.imshow(np.tile(cam, (fixed.shape[1], 1)), origin="lower", aspect="auto",
+                  alpha=0.8, cmap='inferno', extent=extent)
 
         ax.set_facecolor("none")
         ax.axis('off')
-
         ax.axhline(y=0, color='#333', linewidth=1)
 
         st.pyplot(fig)
@@ -566,9 +603,81 @@ else:
     st.info("Grad-CAM not available (missing conv layer or model artifact).")
 
 # =============================================================================
-# 🚨 COPYRIGHT FOOTER (FIXED POSITION) 🚨
+# RESEARCH-GRADE EVALUATION UI
 # =============================================================================
+st.markdown("---")
+st.subheader("📊 Research-Grade Evaluation Metrics")
 
+col_eval1, col_eval2 = st.columns([2, 1])
+with col_eval1:
+    st.markdown("**Test dataset folder** (structure: test_audio/CLASS/*.wav)")
+    test_dir_input = st.text_input("Test dataset path", value="vocapra_project/test_audio")
+with col_eval2:
+    run_eval_btn = st.button("Run Full Evaluation on Test Dataset")
+
+if run_eval_btn:
+    if model is None:
+        st.error("Model not loaded. Cannot run evaluation.")
+    else:
+        try:
+            with st.spinner("Evaluating model on test set... This may take a while depending on dataset size."):
+                eval_out = evaluate_model_on_folder(model, idx_to_label, test_dir=test_dir_input)
+
+            st.success("Evaluation complete!")
+
+            # Overall accuracy
+            st.metric("Overall Accuracy", f"{eval_out['accuracy']*100:.2f}%")
+
+            # Per-class report DataFrame
+            report = eval_out["report"]
+            df_report = pd.DataFrame(report).T
+            # present common columns nicely if available
+            if 'support' in df_report.columns:
+                df_show = df_report[['precision', 'recall', 'f1-score', 'support']].fillna(0)
+            else:
+                df_show = df_report.fillna(0)
+            st.markdown("### Per-Class Precision / Recall / F1-Score")
+            st.dataframe(df_show.style.format({
+                'precision': "{:.3f}",
+                'recall': "{:.3f}",
+                'f1-score': "{:.3f}",
+                'support': "{:.0f}"
+            }))
+
+            # Confusion matrix heatmap
+            st.markdown("### Confusion Matrix")
+            labels = eval_out['labels']
+            fig, ax = plt.subplots(figsize=(max(6, len(labels)*0.6), max(4, len(labels)*0.4)))
+            sns.heatmap(eval_out['cm'], annot=True, fmt="d", cmap="Blues", xticklabels=labels, yticklabels=labels, ax=ax)
+            ax.set_xlabel("Predicted Label")
+            ax.set_ylabel("True Label")
+            plt.xticks(rotation=45, ha='right')
+            st.pyplot(fig)
+            plt.close(fig)
+
+            # Per-class F1 bar chart
+            st.markdown("### Per-Class F1 Score")
+            fig, ax = plt.subplots(figsize=(max(6, len(labels)*0.6), 4))
+            ax.bar(labels, eval_out['f1'], color='#00f3ff')
+            ax.set_ylabel("F1 Score")
+            plt.xticks(rotation=45, ha='right')
+            st.pyplot(fig)
+            plt.close(fig)
+
+            # Provide downloadable CSV of classification report
+            csv_bytes = df_show.reset_index().to_csv(index=False).encode('utf-8')
+            st.download_button("Download per-class report (CSV)", data=csv_bytes, file_name="vocapra_class_report.csv", mime="text/csv")
+
+        except FileNotFoundError as e:
+            st.error(str(e))
+        except ValueError as e:
+            st.error(str(e))
+        except Exception as e:
+            st.error(f"Evaluation failed: {e}")
+
+# =============================================================================
+# COPYRIGHT FOOTER
+# =============================================================================
 st.markdown(
     """
     <div class='fixed-footer'>
@@ -577,5 +686,5 @@ st.markdown(
         </div>
     </div>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
