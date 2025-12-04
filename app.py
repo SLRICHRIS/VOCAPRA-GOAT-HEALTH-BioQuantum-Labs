@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-VOCAPRA Streamlit App – Elite UI v4.2 (Cyber-HUD Edition)
+VOCAPRA Streamlit App – Elite UI v1.O (Cyber-HUD Edition)
 Includes all fixes for fixed footer and widget styling.
 """
 
