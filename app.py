@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
 """
 VOCAPRA Streamlit App — Full corrected single-file app (Elite Dark)
-Fixes: removed theme= from st.plotly_chart and added safe fallbacks around Plotly calls.
+This version includes:
+- Elite dark HUD CSS
+- Plotly interactive waveform & probability bars (fallback to Matplotlib)
+- Robust audio loading (soundfile / librosa)
+- MFCC + deltas feature extraction and fixed-frame input
+- Model & label map loading from vocapra_project/
+- Grad-CAM heatstrip
+- Unsupervised metrics (high-contrast HUD cards)
+- Prototype embeddings (from vocapra_project/prototypes/)
+- Safe fallbacks and error handling
+Save as app.py and run: streamlit run app.py
 """
 
 from __future__ import annotations
@@ -16,7 +26,7 @@ import soundfile as sf
 import tensorflow as tf
 import matplotlib.pyplot as plt
 
-# Optional plotly (used if available)
+# Optional Plotly (used if available)
 try:
     import plotly.graph_objects as go
     import plotly.express as px
@@ -254,7 +264,7 @@ def build_prototypes_from_dir(protos_dir: Path, model, target_frames=TARGET_FRAM
     return protos
 
 # -----------------------
-# Plot helpers
+# Plot helpers (Plotly + Matplotlib fallbacks)
 # -----------------------
 def plotly_waveform(y, sr, title="Waveform", neon_color=PALETTE["neon"]):
     if not PLOTLY_AVAILABLE:
@@ -308,7 +318,8 @@ def make_neon_plot_matplotlib(x, y, color=PALETTE["neon"], title="Waveform"):
     fig, ax = plt.subplots(figsize=(9,2.6), dpi=100)
     fig.patch.set_alpha(0); ax.patch.set_alpha(0)
     ax.plot(x, y, color=color, linewidth=1.6)
-    for n in range(1,5): ax.plot(x, y, color=color, linewidth=1.6+n*0.6, alpha=0.12/n)
+    for n in range(1,5):
+        ax.plot(x, y, color=color, linewidth=1.6+n*0.6, alpha=0.12/n)
     ax.set_facecolor('none')
     ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False); ax.spines['left'].set_visible(False)
     ax.spines['bottom'].set_color('#2b2f33'); ax.tick_params(axis='x', colors=PALETTE["muted"])
@@ -334,7 +345,8 @@ def plot_probability_bars_matplotlib(probs, idx_to_label, top_k=8):
     ax.set_xlim(0,1.0); ax.invert_yaxis()
     ax.xaxis.set_major_formatter(lambda x, pos: f"{x*100:.0f}%")
     ax.grid(axis='x', color='#0f1112', linestyle='--', linewidth=0.5, alpha=0.6)
-    for spine in ['top','right','left']: ax.spines[spine].set_visible(False)
+    for spine in ['top','right','left']:
+        ax.spines[spine].set_visible(False)
     ax.spines['bottom'].set_color('#2b2f33')
     for bar in bars:
         width = bar.get_width()
@@ -344,6 +356,31 @@ def plot_probability_bars_matplotlib(probs, idx_to_label, top_k=8):
         ax.text(xpos, bar.get_y() + bar.get_height()/2.0, f"{width:.2f}", ha=ha, va='center', fontsize=8, color=color, fontfamily='monospace')
     plt.tight_layout()
     return fig
+
+# -----------------------
+# High-contrast HUD metric renderer
+# -----------------------
+def render_elite_metrics(metrics: Dict[str, str], cols: int = 3, neon=PALETTE["neon"], accent=PALETTE["accent"], muted=PALETTE["muted"], fg=PALETTE["fg"]):
+    items = list(metrics.items())
+    rows = []
+    for i in range(0, len(items), cols):
+        rows.append(items[i:i+cols])
+    html = "<div style='display:flex;flex-direction:column;gap:10px;'>"
+    for row in rows:
+        html += "<div style='display:flex;gap:12px;'>"
+        for label, value in row:
+            html += f"""
+            <div style='flex:1; background: rgba(255,255,255,0.015); border:1px solid rgba(255,255,255,0.03);
+                        border-radius:10px; padding:12px; min-height:70px; display:flex; flex-direction:column; justify-content:center;'>
+                <div style='font-size:0.72rem; color:{muted}; text-transform:uppercase; letter-spacing:0.12em; font-family:Inter,monospace;'>{label}</div>
+                <div style='font-size:1.6rem; color:{fg}; font-weight:700; font-family:Manrope, Inter, monospace; margin-top:6px;'>
+                    {value}
+                </div>
+            </div>
+            """
+        html += "</div>"
+    html += "</div>"
+    st.markdown(html, unsafe_allow_html=True)
 
 # -----------------------
 # CSS (elite HUD)
@@ -549,7 +586,7 @@ with g1:
         try:
             fig_wave = plotly_waveform(y, sr, title="Waveform", neon_color=PALETTE["neon"])
             if fig_wave is not None:
-                st.plotly_chart(fig_wave, use_container_width=True)  # NO theme= argument
+                st.plotly_chart(fig_wave, use_container_width=True)
                 plotted = True
         except Exception:
             plotted = False
@@ -565,7 +602,7 @@ with g2:
         try:
             fig_p = plotly_prob_bars(probs, idx_to_label, top_k=8)
             if fig_p is not None:
-                st.plotly_chart(fig_p, use_container_width=True)  # NO theme= argument
+                st.plotly_chart(fig_p, use_container_width=True)
                 plotted = True
         except Exception:
             plotted = False
@@ -573,16 +610,18 @@ with g2:
         fig_p = plot_probability_bars_matplotlib(probs, idx_to_label, top_k=8)
         st.pyplot(fig_p); plt.close(fig_p)
 
-# Metrics
-st.markdown("### Unsupervised metrics (no ground-truth required)")
-c1, c2, c3 = st.columns(3)
-c1.metric("Top confidence", f"{conf_top*100:05.2f}%")
-c2.metric("Entropy", f"{ent:.3f}")
-c3.metric("Confidence margin", f"{margin:.3f}")
-d1, d2, d3 = st.columns(3)
-d1.metric("Estimated SNR (dB)", f"{snr_db:.2f}")
-d2.metric("RMS energy", f"{rms_val:.5f}")
-d3.metric("Zero-cross rate", f"{zcr:.4f}")
+# ===== High-contrast metrics (replacement) =====
+metrics_map = {
+    "Top confidence": f"{conf_top*100:05.2f}%",
+    "Entropy": f"{ent:.3f}",
+    "Confidence margin": f"{margin:.3f}",
+    "Estimated SNR (dB)": f"{snr_db:.2f}",
+    "RMS energy": f"{rms_val:.5f}",
+    "Zero-cross rate": f"{zcr:.4f}"
+}
+st.markdown("### Unsupervised metrics (no ground-truth required)", unsafe_allow_html=True)
+render_elite_metrics(metrics_map, cols=3)
+# ==============================================
 
 if enable_mc and mc_std is not None:
     st.markdown(f"**MC Dropout** — mean top-conf: {mc_mean_conf:.4f}  •  avg std across classes: {mc_std:.4f}")
