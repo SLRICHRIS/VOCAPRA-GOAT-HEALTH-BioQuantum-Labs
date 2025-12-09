@@ -409,8 +409,8 @@ def render_elite_metrics(metrics: Dict[str, str], cols: int = 3,
         box-sizing:border-box;
         font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
       }}
-      .elite-label {{ font-size:0.72rem; color:{muted}; text-transform:uppercase; letter-spacing:0.12em; }}
-      .elite-value {{ font-size:1.6rem; color:{fg}; font-weight:700; font-family: Manrope, Inter, monospace; margin-top:6px; }}
+      .elite-label {{ font-size:0.72rem; color:{PALETTE['muted']}; text-transform:uppercase; letter-spacing:0.12em; }}
+      .elite-value {{ font-size:1.6rem; color:{PALETTE['fg']}; font-weight:700; font-family: Manrope, Inter, monospace; margin-top:6px; }}
       @media (max-width:700px) {{
         .elite-row {{ flex-direction:column; }}
       }}
@@ -519,9 +519,9 @@ enable_aug = st.sidebar.checkbox("Check Augmentation Consistency", value=True)
 ood_threshold = st.sidebar.slider("OOD softmax-max threshold", 0.0, 1.0, 0.2, 0.01)
 embed_layer = st.sidebar.text_input("Embedding layer name (optional)", value="")
 
-# Header
+# Header (updated goat-specific tagline)
 st.markdown("<div class='hud-title'>VOCAPRA <span style='color:#00f3ff'>.AI</span></div>", unsafe_allow_html=True)
-st.markdown("<div class='label-small'>// Acoustic Event Recognition — corrected & elite</div>", unsafe_allow_html=True)
+st.markdown("<div class='label-small'>// Real-time Acoustic Intelligence for Goats — Detect. Explain. Act.</div>", unsafe_allow_html=True)
 
 # File uploader
 uploaded = st.file_uploader("Upload WAV", type=["wav"])
