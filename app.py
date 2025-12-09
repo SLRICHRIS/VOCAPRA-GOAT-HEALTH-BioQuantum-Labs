@@ -2,9 +2,11 @@
 """
 VOCAPRA Streamlit App — Full corrected single-file app (Elite Dark)
 - Glossy/high-contrast metric cards
+- Aligned glossy Grad-CAM + MFCC plotting (handles mismatched cam length)
 - Goat-specific tagline
 - Robust audio loading & inference, Grad-CAM, prototype similarity
-Save as app.py and run: streamlit run app.py
+Save as app.py and run:
+    streamlit run app.py
 """
 
 from __future__ import annotations
@@ -21,6 +23,9 @@ import librosa
 import soundfile as sf
 import tensorflow as tf
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+from matplotlib.colors import Normalize
+import matplotlib.gridspec as gridspec
 
 # Optional Plotly
 try:
@@ -70,7 +75,7 @@ plt.rcParams.update({
 })
 
 # -----------------------
-# HELPERS
+# HELPERS: artifacts, features, model load
 # -----------------------
 def resolve_artifact(pattern: str) -> Optional[Path]:
     if not ARTIFACT_DIR.exists():
@@ -103,6 +108,7 @@ def load_model_and_gradcam():
         return None, None, None, None
     model = tf.keras.models.load_model(str(model_path))
     conv_layer_name = None
+    # find last Conv1D if present
     for layer in reversed(model.layers):
         if isinstance(layer, tf.keras.layers.Conv1D):
             conv_layer_name = layer.name
@@ -130,8 +136,15 @@ def load_label_map():
         label_to_idx = {v: k for k, v in idx_to_label.items()}
     return idx_to_label, label_to_idx, json_path
 
-# Grad-CAM
+# -----------------------
+# Grad-CAM (with safe upsampling if needed)
+# -----------------------
 def run_gradcam(grad_model, sample):
+    """
+    grad_model: model that returns (conv_outs, preds)
+    sample: numpy array shaped (1, T, F) or (1, T, F, 1)
+    returns cam_resized (T_in,), class_idx (int)
+    """
     if grad_model is None:
         raise ValueError("grad_model unavailable")
     sample_tf = tf.convert_to_tensor(sample.astype(np.float32))
@@ -142,16 +155,25 @@ def run_gradcam(grad_model, sample):
         loss = preds_tensor[:, class_idx]
     grads = tape.gradient(loss, conv_outs)
     if grads is None:
-        return np.zeros(sample.shape[1]), class_idx
-    weights = tf.reduce_mean(grads, axis=1)
-    cam = tf.reduce_sum(conv_outs * weights[:, tf.newaxis, :], axis=-1)
-    cam = tf.nn.relu(cam).numpy()[0]
+        # fallback to zeros
+        T_in = sample.shape[1]
+        return np.zeros(T_in), class_idx
+    weights = tf.reduce_mean(grads, axis=1)  # (1, C)
+    cam = tf.reduce_sum(conv_outs * weights[:, tf.newaxis, :], axis=-1)  # (1, T_cam)
+    cam = tf.nn.relu(cam).numpy()[0]  # (T_cam,)
     cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-9)
+    # Resize CAM to input time axis T_in
     T_in = sample.shape[1]
-    cam_resized = np.interp(np.linspace(0, cam.shape[0]-1, T_in), np.arange(cam.shape[0]), cam)
+    T_cam = cam.shape[0]
+    if T_cam == T_in:
+        cam_resized = cam
+    else:
+        cam_resized = np.interp(np.linspace(0, T_cam - 1, T_in), np.arange(T_cam), cam)
     return cam_resized, class_idx
 
-# Unsupervised helpers
+# -----------------------
+# UNSUPERVISED METRICS HELPERS
+# -----------------------
 def softmax_safe(probs):
     p = np.array(probs, dtype=np.float32)
     p = np.maximum(p, 1e-12)
@@ -235,7 +257,9 @@ def cosine_similarity(a, b):
         return 0.0
     return float(np.dot(a, b) / ((np.linalg.norm(a) + 1e-12) * (np.linalg.norm(b) + 1e-12)))
 
-# Prototype builder
+# -----------------------
+# PROTOTYPE BUILD
+# -----------------------
 @st.cache_resource(show_spinner=False)
 def build_prototypes_from_dir(protos_dir: Path, model, target_frames=TARGET_FRAMES):
     if not protos_dir.exists():
@@ -262,7 +286,9 @@ def build_prototypes_from_dir(protos_dir: Path, model, target_frames=TARGET_FRAM
             protos[cls.name] = np.mean(np.vstack(embs), axis=0)
     return protos
 
-# Plot helpers (Plotly + Matplotlib fallback)
+# -----------------------
+# Plot helpers (Plotly + Matplotlib fallbacks)
+# -----------------------
 def plotly_waveform(y, sr, title="Waveform", neon_color=PALETTE["neon"]):
     if not PLOTLY_AVAILABLE:
         return None
@@ -314,14 +340,19 @@ def plotly_prob_bars(probs, idx_to_label, top_k=8):
 
 def make_neon_plot_matplotlib(x, y, color=PALETTE["neon"], title="Waveform"):
     fig, ax = plt.subplots(figsize=(9, 2.6), dpi=100)
-    fig.patch.set_alpha(0); ax.patch.set_alpha(0)
+    fig.patch.set_alpha(0)
+    ax.patch.set_alpha(0)
     ax.plot(x, y, color=color, linewidth=1.6)
     for n in range(1, 5):
         ax.plot(x, y, color=color, linewidth=1.6 + n*0.6, alpha=0.12/n)
     ax.set_facecolor('none')
-    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False); ax.spines['left'].set_visible(False)
-    ax.spines['bottom'].set_color('#2b2f33'); ax.tick_params(axis='x', colors=PALETTE["muted"])
-    ax.set_yticks([]); ax.set_xlabel("Time (s)", color=PALETTE["muted"], fontsize=9)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+    ax.spines['bottom'].set_color('#2b2f33')
+    ax.tick_params(axis='x', colors=PALETTE["muted"])
+    ax.set_yticks([])
+    ax.set_xlabel("Time (s)", color=PALETTE["muted"], fontsize=9)
     ax.set_title(title, color=PALETTE["fg"], fontsize=11)
     ax.grid(axis='x', color='#111214', linestyle='--', linewidth=0.4, alpha=0.25)
     plt.tight_layout()
@@ -332,7 +363,8 @@ def plot_probability_bars_matplotlib(probs, idx_to_label, top_k=8):
     top_labels = [idx_to_label[i] for i in sorted_idx]
     top_vals = probs[sorted_idx]
     fig, ax = plt.subplots(figsize=(5.2, 3), dpi=100)
-    fig.patch.set_alpha(0); ax.patch.set_alpha(0)
+    fig.patch.set_alpha(0)
+    ax.patch.set_alpha(0)
     cmap = plt.get_cmap(PALETTE["bar_cmap"])
     colors = cmap(np.linspace(0.15, 0.85, len(top_vals)))
     y_pos = np.arange(len(top_vals))
@@ -340,10 +372,11 @@ def plot_probability_bars_matplotlib(probs, idx_to_label, top_k=8):
     ax.set_yticks(y_pos)
     ax.set_yticklabels([l.upper() for l in top_labels[::-1]], fontsize=9, color=PALETTE["fg"])
     ax.set_xlabel("Probability", color=PALETTE["muted"], fontsize=9)
-    ax.set_xlim(0, 1.0); ax.invert_yaxis()
+    ax.set_xlim(0, 1.0)
+    ax.invert_yaxis()
     ax.xaxis.set_major_formatter(lambda x, pos: f"{x*100:.0f}%")
     ax.grid(axis='x', color='#0f1112', linestyle='--', linewidth=0.5, alpha=0.6)
-    for spine in ['top','right','left']:
+    for spine in ['top', 'right', 'left']:
         ax.spines[spine].set_visible(False)
     ax.spines['bottom'].set_color('#2b2f33')
     for bar in bars:
@@ -462,13 +495,8 @@ body, .stApp {{
 def render_elite_metrics(metrics: Dict[str, str], cols: int = 3,
                          neon=PALETTE["neon"], accent=PALETTE["accent"],
                          muted=PALETTE["muted"], fg=PALETTE["fg"]):
-    """
-    Render glossy neon metric cards via components HTML.
-    Each card shows a value and a tiny progress bar scaled between 0-1 when possible.
-    """
     items = list(metrics.items())
     rows = [items[i:i+cols] for i in range(0, len(items), cols)]
-
     def safe_ratio(v):
         try:
             s = str(v).strip()
@@ -478,11 +506,9 @@ def render_elite_metrics(metrics: Dict[str, str], cols: int = 3,
             num = float(s)
             if abs(num) <= 1.0:
                 return max(0.0, min(1.0, num))
-            # compress larger values (arctan squashing)
             return float((2/math.pi) * math.atan(num/10.0))
         except Exception:
             return 0.0
-
     body = "<div>"
     for row in rows:
         body += "<div class='elite-row'>"
@@ -502,10 +528,142 @@ def render_elite_metrics(metrics: Dict[str, str], cols: int = 3,
             """
         body += "</div>"
     body += "</div>"
-
-    html_full = ELITE_CSS + body  # include CSS to be safe (again)
+    html_full = ELITE_CSS + body
     height = max(140, 120 * len(rows))
     st_html(html_full, height=height, scrolling=True)
+
+# -----------------------
+# ALIGNED glossy Grad-CAM + MFCC plotting (handles cam upsampling)
+# -----------------------
+def plot_mfcc_gradcam_glossy_aligned(fixed, cam, audio, sr,
+                                     title="Feature map (MFCC + deltas)",
+                                     mfcc_cmap=PALETTE["mfcc_cmap"],
+                                     cam_cmap=PALETTE["cam_cmap"],
+                                     bg_color=PALETTE["bg"],
+                                     fg_color=PALETTE["fg"],
+                                     muted=PALETTE["muted"]):
+    """
+    Improved Grad-CAM + MFCC glossy plotting with precise alignment.
+    - fixed: (T_frames, F_bins)
+    - cam:   (T_cam,) or (T_frames,)
+    - audio, sr: used to compute duration for x-axis (seconds)
+    Returns matplotlib.figure.Figure
+    """
+    T_frames = fixed.shape[0]
+    F_bins = fixed.shape[1]
+    duration_s = len(audio) / sr
+
+    # If cam length differs, upsample/interpolate to T_frames
+    cam = np.asarray(cam, dtype=np.float32)
+    if cam.ndim != 1:
+        cam = cam.ravel()
+    if cam.size == 0:
+        cam = np.zeros((T_frames,), dtype=np.float32)
+    elif cam.size != T_frames:
+        cam = np.interp(np.linspace(0, cam.size - 1, T_frames), np.arange(cam.size), cam)
+
+    # normalize cam 0-1
+    cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-9)
+
+    # Figure and GridSpec: two rows, colorbar on right
+    fig = plt.figure(figsize=(12, 4.2), dpi=120, facecolor="none")
+    fig.patch.set_alpha(0)
+
+    gs = gridspec.GridSpec(nrows=2, ncols=10, figure=fig, left=0.06, right=0.92, top=0.95, bottom=0.10,
+                           hspace=0.12, wspace=0.02)
+    ax_mfcc = fig.add_subplot(gs[0, 0:9])
+    ax_cam  = fig.add_subplot(gs[1, 0:9], sharex=ax_mfcc)
+    cax = fig.add_subplot(gs[:, 9])
+
+    # Glossy rounded card backdrop in figure coords
+    rect_bg = patches.FancyBboxPatch(
+        (0.02, 0.06), 0.90, 0.88,
+        transform=fig.transFigure,
+        boxstyle="round,pad=0.02,rounding_size=12",
+        linewidth=0,
+        facecolor=(0.04, 0.04, 0.05, 0.72),
+        zorder=0
+    )
+    fig.patches.append(rect_bg)
+
+    # MFCC heatmap plotted with time extent (seconds)
+    im = ax_mfcc.imshow(
+        fixed.T,
+        origin="lower",
+        aspect="auto",
+        cmap=mfcc_cmap,
+        interpolation='nearest',
+        norm=Normalize(vmin=np.percentile(fixed, 5), vmax=np.percentile(fixed, 99)),
+        extent=[0.0, duration_s, 0, F_bins]
+    )
+    ax_mfcc.set_ylabel("Feature bins", color=muted, fontsize=10)
+    ax_mfcc.set_yticks(np.linspace(0, F_bins - 1, min(6, F_bins)).astype(int))
+    ax_mfcc.set_xticklabels([])
+    ax_mfcc.tick_params(axis='y', colors=muted)
+    ax_mfcc.set_title(title, color=fg_color, fontsize=12, pad=8, weight='600')
+
+    # CAM heatstrip: tile cam vertically; extent in seconds
+    cam_map = np.tile(cam, (max(3, F_bins//8), 1))
+    ax_cam.imshow(
+        cam_map,
+        origin='lower',
+        aspect='auto',
+        cmap=cam_cmap,
+        interpolation='bilinear',
+        extent=[0.0, duration_s, 0, 1]
+    )
+    ax_cam.set_xlabel("Time (s)", color=muted, fontsize=10)
+    ax_cam.set_yticks([])
+    ax_cam.tick_params(axis='x', colors=muted)
+
+    # Colorbar aligned to the MFCC image
+    cbar = fig.colorbar(im, cax=cax, orientation='vertical', pad=0.01)
+    cbar.set_label("Feature magnitude", color=muted, fontsize=9)
+    cbar.ax.yaxis.set_tick_params(color=muted)
+    plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color=muted)
+
+    # Gridlines and thin frames
+    ax_mfcc.grid(axis='x', color='#0b0c0d', linestyle='--', linewidth=0.35, alpha=0.45)
+    ax_cam.grid(axis='x', color='#0b0c0d', linestyle='--', linewidth=0.35, alpha=0.45)
+    for spine in ax_mfcc.spines.values():
+        spine.set_edgecolor("#121314"); spine.set_linewidth(0.6)
+    for spine in ax_cam.spines.values():
+        spine.set_edgecolor("#121314"); spine.set_linewidth(0.6)
+
+    # X ticks in seconds (consistent)
+    n_ticks = 5
+    xticks = np.linspace(0.0, duration_s, n_ticks)
+    xtick_labels = [f"{t:.2f}s" for t in xticks]
+    ax_cam.set_xticks(xticks)
+    ax_cam.set_xticklabels(xtick_labels, color=muted, fontsize=9)
+    ax_mfcc.set_xlim(0.0, duration_s); ax_cam.set_xlim(0.0, duration_s)
+
+    # Neon vertical marker aligned to peak activation (in seconds)
+    peak_frame_idx = int(np.argmax(cam))
+    if T_frames > 1:
+        peak_time = float((peak_frame_idx / (T_frames - 1)) * duration_s)
+    else:
+        peak_time = 0.0
+    for a in (ax_mfcc, ax_cam):
+        a.axvline(x=peak_time, color=PALETTE["neon"], linewidth=1.1, alpha=0.95, zorder=3)
+
+    # Small info box inside figure coords (top-right inside card)
+    info_x, info_y = 0.70, 0.82
+    info_box = patches.FancyBboxPatch(
+        (info_x, info_y), 0.26, 0.12,
+        transform=fig.transFigure,
+        boxstyle="round,pad=0.02,rounding_size=8",
+        linewidth=0.5,
+        edgecolor=(1,1,1,0.03),
+        facecolor=(1,1,1,0.015),
+        zorder=4
+    )
+    fig.patches.append(info_box)
+    fig.text(info_x + 0.02, info_y + 0.06, "Activation", color=muted, fontsize=9)
+    fig.text(info_x + 0.02, info_y + 0.02, f"Peak: {peak_frame_idx} ({peak_time:.2f}s)", color=fg_color, fontsize=10, weight='600')
+
+    plt.subplots_adjust(left=0.06, right=0.92, top=0.95, bottom=0.10, hspace=0.12)
+    return fig
 
 # -----------------------
 # STREAMLIT UI
@@ -532,7 +690,7 @@ with st.sidebar:
 if model is None or not idx_to_label:
     st.sidebar.warning("Artifacts missing in vocapra_project/ — UI will load but inference is disabled.")
 
-# build prototypes
+# build prototypes (if available)
 prototypes = {}
 if model is not None and PROTOTYPES_DIR.exists():
     prototypes = build_prototypes_from_dir(PROTOTYPES_DIR, model, target_frames=TARGET_FRAMES)
@@ -585,7 +743,7 @@ if model is None:
     st.error("Model not found — place best_model*.h5 in vocapra_project/ and reload.")
     st.stop()
 
-# inference fallback with channel dimension if needed
+# inference (with channel fallback)
 try:
     probs = model.predict(x_in, verbose=0)[0]
 except Exception:
@@ -636,7 +794,7 @@ if enable_aug:
     except Exception:
         consistency = None
 
-# embedding & prototypes
+# embedding & prototype similarity
 embedding = None; embedding_norm = None; proto_sims = {}
 try:
     embedding = get_embedding(model, x_in, layer_name=embed_layer if embed_layer.strip() else None)
@@ -650,7 +808,7 @@ try:
 except Exception:
     proto_sorted = []
 
-# Primary detection card
+# Primary card (elite)
 st.markdown(f"""
 <div class='hud-card' style='display:flex; justify-content:space-between; align-items:center;'>
   <div>
@@ -664,7 +822,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# Visuals
+# Visuals: Plotly (if available) with Matplotlib fallback
 g1, g2 = st.columns([1.7, 1.3])
 with g1:
     st.markdown("<div class='label-small'>SIGNAL OSCILLOSCOPE</div>", unsafe_allow_html=True)
@@ -679,7 +837,8 @@ with g1:
             plotted = False
     if not plotted:
         fig_w = make_neon_plot_matplotlib(np.linspace(0, len(y)/sr, len(y)), y, color=PALETTE["neon"], title="Waveform")
-        st.pyplot(fig_w); plt.close(fig_w)
+        st.pyplot(fig_w)
+        plt.close(fig_w)
 
 with g2:
     st.markdown("<div class='label-small'>PROBABILITIES</div>", unsafe_allow_html=True)
@@ -694,9 +853,10 @@ with g2:
             plotted = False
     if not plotted:
         fig_p = plot_probability_bars_matplotlib(probs, idx_to_label, top_k=8)
-        st.pyplot(fig_p); plt.close(fig_p)
+        st.pyplot(fig_p)
+        plt.close(fig_p)
 
-# Unsupervised metrics (glossy)
+# ===== High-contrast metrics (glossy) =====
 metrics_map = {
     "Top confidence": f"{conf_top*100:05.2f}%",
     "Entropy": f"{ent:.3f}",
@@ -707,6 +867,7 @@ metrics_map = {
 }
 st.markdown("### Unsupervised metrics (no ground-truth required)", unsafe_allow_html=True)
 render_elite_metrics(metrics_map, cols=3)
+# ==============================================
 
 if enable_mc and mc_std is not None:
     st.markdown(f"**MC Dropout** — mean top-conf: {mc_mean_conf:.4f}  •  avg std across classes: {mc_std:.4f}")
@@ -725,29 +886,17 @@ if proto_sorted:
 if is_ood:
     st.warning(f"Softmax max ({conf_top:.3f}) < OOD threshold ({ood_threshold:.3f}) — sample may be Out-Of-Distribution")
 
-# Grad-CAM
+# Grad-CAM (aligned glossy)
 if grad_model is not None:
     try:
         cam, _ = run_gradcam(grad_model, x_in)
-        T_frames = fixed.shape[0]; F_bins = fixed.shape[1]; duration_s = len(y)/sr
-        fig, (ax_mfcc, ax_cam) = plt.subplots(2,1, figsize=(12,4), gridspec_kw={'height_ratios':[1,0.25]}, dpi=120)
-        fig.patch.set_alpha(0); ax_mfcc.patch.set_alpha(0)
-        im = ax_mfcc.imshow(fixed.T, origin='lower', aspect='auto', cmap=PALETTE["mfcc_cmap"])
-        ax_mfcc.set_ylabel("Feature bins", color=PALETTE["muted"], fontsize=9)
-        ax_mfcc.set_xticks(np.linspace(0, T_frames-1, 5))
-        ax_mfcc.set_xticklabels([f"{t:.2f}s" for t in np.linspace(0, duration_s, 5)], color=PALETTE["muted"])
-        ax_mfcc.set_title("Feature map (MFCC + deltas)", color=PALETTE["fg"], fontsize=10)
-        ax_cam.imshow(np.tile(cam, (F_bins,1)), origin='lower', aspect='auto', cmap=PALETTE["cam_cmap"], alpha=0.95, extent=[0,T_frames,0,F_bins])
-        ax_cam.set_xlabel("Time (s)", color=PALETTE["muted"], fontsize=9)
-        ax_cam.set_xticks(np.linspace(0, T_frames-1, 5))
-        ax_cam.set_xticklabels([f"{t:.2f}s" for t in np.linspace(0, duration_s, 5)], color=PALETTE["muted"])
-        ax_cam.set_yticks([])
-        cbar = fig.colorbar(im, ax=[ax_mfcc, ax_cam], orientation='vertical', pad=0.02)
-        cbar.set_label("Feature magnitude", color=PALETTE["muted"], fontsize=9)
-        cbar.ax.yaxis.set_tick_params(color=PALETTE["muted"]); plt.setp(plt.getp(cbar.ax.axes,'yticklabels'), color=PALETTE["muted"])
-        plt.tight_layout()
+        fig = plot_mfcc_gradcam_glossy_aligned(fixed, cam, y, sr,
+                                              title="Feature map (MFCC + deltas)",
+                                              mfcc_cmap=PALETTE["mfcc_cmap"],
+                                              cam_cmap=PALETTE["cam_cmap"])
         st.markdown("<div class='label-small'>NEURAL ACTIVATION MAP [GRAD-CAM]</div>", unsafe_allow_html=True)
-        st.pyplot(fig); plt.close(fig)
+        st.pyplot(fig)
+        plt.close(fig)
     except Exception as e:
         st.error(f"Grad-CAM failed: {e}")
 
