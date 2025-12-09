@@ -510,7 +510,7 @@ def render_elite_metrics(metrics: Dict[str, str], cols: int = 3,
 # -----------------------
 # STREAMLIT UI
 # -----------------------
-st.set_page_config(page_title="VOCAPRA HUD (Corrected)", page_icon="💠", layout="wide")
+st.set_page_config(page_title="VOCAPRA.AI - Acoustic Intelligence Console", page_icon="🐐", layout="wide")
 st.markdown(ELITE_CSS, unsafe_allow_html=True)
 
 # Load artifacts
