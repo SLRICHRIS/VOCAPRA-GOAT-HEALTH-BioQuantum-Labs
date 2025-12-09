@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-VOCAPRA Streamlit App – Elite UI v5.0 (Full elite dark + Plotly)
-Single-file app: inference + unsupervised metrics + prototypes + Grad-CAM + interactive visuals.
+VOCAPRA Streamlit App — Full corrected single-file app (Elite Dark)
+Fixes: removed theme= from st.plotly_chart and added safe fallbacks around Plotly calls.
 """
 
 from __future__ import annotations
@@ -15,8 +15,14 @@ import librosa
 import soundfile as sf
 import tensorflow as tf
 import matplotlib.pyplot as plt
-import plotly.graph_objects as go
-import plotly.express as px
+
+# Optional plotly (used if available)
+try:
+    import plotly.graph_objects as go
+    import plotly.express as px
+    PLOTLY_AVAILABLE = True
+except Exception:
+    PLOTLY_AVAILABLE = False
 
 # -----------------------
 # CONFIG
@@ -29,7 +35,6 @@ TARGET_FRAMES = 80
 ARTIFACT_DIR = Path("vocapra_project")
 PROTOTYPES_DIR = ARTIFACT_DIR / "prototypes"
 
-# Elite dark HUD palette
 PALETTE = {
     "bg": "#030406",
     "panel_alpha": 0.02,
@@ -108,7 +113,6 @@ def load_label_map():
         return {}, {}, None
     with open(json_path, "r") as f:
         label_to_idx_raw = json.load(f)
-    # normalize to label->idx and idx->label
     if all(isinstance(v, (int, str)) for v in label_to_idx_raw.values()):
         label_to_idx = {str(k): int(v) for k, v in label_to_idx_raw.items()}
         idx_to_label = {int(v): str(k) for k, v in label_to_idx_raw.items()}
@@ -250,11 +254,12 @@ def build_prototypes_from_dir(protos_dir: Path, model, target_frames=TARGET_FRAM
     return protos
 
 # -----------------------
-# PLOTLY helpers (interactive)
+# Plot helpers
 # -----------------------
 def plotly_waveform(y, sr, title="Waveform", neon_color=PALETTE["neon"]):
+    if not PLOTLY_AVAILABLE:
+        return None
     t = np.linspace(0, len(y)/sr, len(y))
-    # downsample for long signals
     max_points = 6000
     if t.size > max_points:
         idx = np.linspace(0, t.size-1, max_points).astype(int)
@@ -265,7 +270,6 @@ def plotly_waveform(y, sr, title="Waveform", neon_color=PALETTE["neon"]):
     fig.add_trace(go.Scatter(x=t, y=y_plot, mode='lines',
                              line=dict(color=neon_color, width=1.6),
                              hovertemplate='time: %{x:.3f}s<br>amp: %{y:.3f}<extra></extra>'))
-    # glow layers
     for w,a in [(3,0.06),(6,0.03),(12,0.02)]:
         fig.add_trace(go.Scatter(x=t, y=y_plot, mode='lines',
                                  line=dict(color=neon_color, width=w),
@@ -279,6 +283,8 @@ def plotly_waveform(y, sr, title="Waveform", neon_color=PALETTE["neon"]):
     return fig
 
 def plotly_prob_bars(probs, idx_to_label, top_k=8):
+    if not PLOTLY_AVAILABLE:
+        return None
     sorted_idx = np.argsort(probs)[::-1][:top_k]
     labels = [idx_to_label[i].upper() for i in sorted_idx]
     vals = probs[sorted_idx]
@@ -298,13 +304,53 @@ def plotly_prob_bars(probs, idx_to_label, top_k=8):
                       yaxis=dict(autorange='reversed', color=PALETTE["fg"]))
     return fig
 
+def make_neon_plot_matplotlib(x, y, color=PALETTE["neon"], title="Waveform"):
+    fig, ax = plt.subplots(figsize=(9,2.6), dpi=100)
+    fig.patch.set_alpha(0); ax.patch.set_alpha(0)
+    ax.plot(x, y, color=color, linewidth=1.6)
+    for n in range(1,5): ax.plot(x, y, color=color, linewidth=1.6+n*0.6, alpha=0.12/n)
+    ax.set_facecolor('none')
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False); ax.spines['left'].set_visible(False)
+    ax.spines['bottom'].set_color('#2b2f33'); ax.tick_params(axis='x', colors=PALETTE["muted"])
+    ax.set_yticks([]); ax.set_xlabel("Time (s)", color=PALETTE["muted"], fontsize=9)
+    ax.set_title(title, color=PALETTE["fg"], fontsize=11)
+    ax.grid(axis='x', color='#111214', linestyle='--', linewidth=0.4, alpha=0.25)
+    plt.tight_layout()
+    return fig
+
+def plot_probability_bars_matplotlib(probs, idx_to_label, top_k=8):
+    sorted_idx = np.argsort(probs)[::-1][:top_k]
+    top_labels = [idx_to_label[i] for i in sorted_idx]
+    top_vals = probs[sorted_idx]
+    fig, ax = plt.subplots(figsize=(5.2,3), dpi=100)
+    fig.patch.set_alpha(0); ax.patch.set_alpha(0)
+    cmap = plt.get_cmap(PALETTE["bar_cmap"])
+    colors = cmap(np.linspace(0.15, 0.85, len(top_vals)))
+    y_pos = np.arange(len(top_vals))
+    bars = ax.barh(y_pos, top_vals[::-1], color=colors[::-1], height=0.6, edgecolor='#111214', linewidth=0.35)
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels([l.upper() for l in top_labels[::-1]], fontsize=9, color=PALETTE["fg"])
+    ax.set_xlabel("Probability", color=PALETTE["muted"], fontsize=9)
+    ax.set_xlim(0,1.0); ax.invert_yaxis()
+    ax.xaxis.set_major_formatter(lambda x, pos: f"{x*100:.0f}%")
+    ax.grid(axis='x', color='#0f1112', linestyle='--', linewidth=0.5, alpha=0.6)
+    for spine in ['top','right','left']: ax.spines[spine].set_visible(False)
+    ax.spines['bottom'].set_color('#2b2f33')
+    for bar in bars:
+        width = bar.get_width()
+        xpos = width + 0.02 if width < 0.18 else width - 0.02
+        ha = 'left' if width < 0.18 else 'right'
+        color = '#111214' if width < 0.18 else '#fff'
+        ax.text(xpos, bar.get_y() + bar.get_height()/2.0, f"{width:.2f}", ha=ha, va='center', fontsize=8, color=color, fontfamily='monospace')
+    plt.tight_layout()
+    return fig
+
 # -----------------------
-# CSS (elite HUD) - paste once via st.markdown
+# CSS (elite HUD)
 # -----------------------
 ELITE_CSS = f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&family=Manrope:wght@400;600;700&display=swap');
-
 :root {{
   --bg: {PALETTE['bg']};
   --neon: {PALETTE['neon']};
@@ -312,18 +358,14 @@ ELITE_CSS = f"""
   --muted: {PALETTE['muted']};
   --fg: {PALETTE['fg']};
 }}
-
 body, .stApp {{
   background: radial-gradient(1200px 500px at 10% 10%, rgba(0,243,255,0.03), transparent 6%),
               radial-gradient(1000px 400px at 90% 20%, rgba(188,19,254,0.03), transparent 6%),
               var(--bg) !important;
   color: var(--fg) !important;
   font-family: 'Inter', 'Manrope', system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
 }}
-
-.hud-card, .stCard, .st-bf {{
+.hud-card {{
   background: linear-gradient(180deg, rgba(255,255,255,{PALETTE['panel_alpha']}), rgba(255,255,255,0.01));
   border: 1px solid rgba(255,255,255,0.04);
   border-left: 4px solid rgba(188,19,254,0.09);
@@ -332,68 +374,23 @@ body, .stApp {{
   padding: 12px;
   backdrop-filter: blur(8px) saturate(120%);
 }}
-
-.hud-title {{
-  font-family: 'Manrope', Inter, sans-serif;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  color: var(--fg);
-  font-size: 1.8rem;
-  margin-bottom: 4px;
-}}
-
-.hud-hero {{
-  font-family: 'Manrope', Inter, sans-serif;
-  font-weight: 800;
-  font-size: 2.8rem;
-  background: linear-gradient(90deg, var(--fg), var(--neon), var(--accent));
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  position: relative;
-  display: inline-block;
-}}
-.hud-hero::after{{
-  content: '';
-  position: absolute;
-  left: -40%;
-  top: 0;
-  height: 100%;
-  width: 40%;
-  background: linear-gradient(90deg, rgba(255,255,255,0.0), rgba(255,255,255,0.12), rgba(255,255,255,0.0));
-  transform: skewX(-18deg);
-  animation: hero-shimmer 4s linear infinite;
-  pointer-events:none;
-}}
+.hud-title {{ font-family: 'Manrope', Inter, sans-serif; font-weight:700; font-size:1.8rem; color:var(--fg);}}
+.hud-hero {{ font-family: 'Manrope', Inter, sans-serif; font-weight:800; font-size:2.8rem; background: linear-gradient(90deg, var(--fg), var(--neon), var(--accent)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; position: relative; display:inline-block;}}
+.hud-hero::after{{ content:''; position:absolute; left:-40%; top:0; height:100%; width:40%; background: linear-gradient(90deg, rgba(255,255,255,0.0), rgba(255,255,255,0.12), rgba(255,255,255,0.0)); transform:skewX(-18deg); animation: hero-shimmer 4s linear infinite; pointer-events:none; }}
 @keyframes hero-shimmer{{ 0%{{ left:-40% }} 50% {{ left:120% }} 100% {{ left:120% }} }}
-
-.confidence-pulse {{
-  font-family: 'Inter', monospace;
-  font-weight: 700;
-  font-size: 1.6rem;
-  color: var(--fg);
-  text-shadow: 0 0 12px rgba(0,243,255,0.12);
-  animation: pulse 2.4s infinite;
-}}
+.confidence-pulse {{ font-family: 'Inter', monospace; font-weight:700; font-size:1.6rem; color:var(--fg); text-shadow: 0 0 12px rgba(0,243,255,0.12); animation: pulse 2.4s infinite; }}
 @keyframes pulse {{ 0% {{ transform: scale(1); opacity:1; }} 50% {{ transform: scale(1.03); opacity:0.95; text-shadow: 0 0 18px rgba(0,243,255,0.22); }} 100% {{ transform: scale(1); opacity:1; }} }}
-
 .label-small {{ font-size:0.72rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.12em; }}
-
 .stButton>button {{ background: linear-gradient(90deg, rgba(0,243,255,0.06), rgba(188,19,254,0.04)); border: 1px solid rgba(255,255,255,0.04); color: var(--fg); border-radius: 10px; padding: 8px 14px; }}
 .stButton>button:hover {{ box-shadow: 0 6px 20px rgba(0,0,0,0.6), 0 0 20px rgba(0,243,255,0.05); }}
-
-@media (max-width: 880px) {{
-  .hud-hero {{ font-size:1.6rem; }}
-}}
 </style>
 """
-
-# -----------------------
-# STREAMLIT UI
-# -----------------------
-st.set_page_config(page_title="VOCAPRA HUD (Elite Dark)", page_icon="💠", layout="wide")
+st.set_page_config(page_title="VOCAPRA HUD (Corrected)", page_icon="💠", layout="wide")
 st.markdown(ELITE_CSS, unsafe_allow_html=True)
 
-# Load artifacts
+# -----------------------
+# LOAD ARTIFACTS & SIDEBAR
+# -----------------------
 idx_to_label, label_to_idx, label_json_path = load_label_map()
 model, grad_model, conv_name, model_path = load_model_and_gradcam()
 
@@ -412,7 +409,7 @@ with st.sidebar:
 if model is None or not idx_to_label:
     st.sidebar.warning("Artifacts missing in vocapra_project/ — UI will load but inference is disabled.")
 
-# build prototypes (if available)
+# Build prototypes (if available)
 prototypes = {}
 if model is not None and PROTOTYPES_DIR.exists():
     prototypes = build_prototypes_from_dir(PROTOTYPES_DIR, model, target_frames=TARGET_FRAMES)
@@ -421,7 +418,7 @@ if model is not None and PROTOTYPES_DIR.exists():
     else:
         st.sidebar.info("No prototypes found in vocapra_project/prototypes/")
 
-# Sidebar controls
+# Sidebar options
 st.sidebar.markdown("### Unsupervised options")
 enable_mc = st.sidebar.checkbox("Enable MC Dropout (uncertainty)", value=False)
 mc_runs = st.sidebar.number_input("MC runs", min_value=5, max_value=50, value=10, step=1) if enable_mc else 10
@@ -431,14 +428,14 @@ embed_layer = st.sidebar.text_input("Embedding layer name (optional)", value="")
 
 # Header
 st.markdown("<div class='hud-title'>VOCAPRA <span style='color:#00f3ff'>.AI</span></div>", unsafe_allow_html=True)
-st.markdown("<div class='label-small'>// Acoustic Event Recognition — Elite Dark HUD</div>", unsafe_allow_html=True)
+st.markdown("<div class='label-small'>// Acoustic Event Recognition — corrected & elite</div>", unsafe_allow_html=True)
 
 # File uploader
 uploaded = st.file_uploader("Upload WAV", type=["wav"])
 if uploaded is None:
     st.stop()
 
-# read audio robustly
+# Read audio robustly
 uploaded.seek(0)
 file_bytes = uploaded.read()
 try:
@@ -452,19 +449,19 @@ try:
 except Exception:
     y, sr = librosa.load(io.BytesIO(file_bytes), sr=SR, mono=True)
 
-# audio player
+# Audio player
 st.audio(file_bytes, format='audio/wav')
 
-# features & model input
+# Features & predict
 feats = compute_mfcc_with_deltas(y, sr=sr)
 fixed = to_fixed_frames(feats, TARGET_FRAMES)
 x_in = np.expand_dims(fixed, axis=0).astype(np.float32)
 
 if model is None:
-    st.error("Model not found — place best_model*.h5 in vocapra_project/ and reload.")
+    st.error("Model not found — put best_model*.h5 into vocapra_project/ and reload.")
     st.stop()
 
-# inference (with channel fallback)
+# Inference (channel fallback)
 try:
     probs = model.predict(x_in, verbose=0)[0]
 except Exception:
@@ -515,7 +512,7 @@ if enable_aug:
     except Exception:
         consistency = None
 
-# embedding & prototype similarity
+# embedding & prototypes
 embedding = None; embedding_norm = None; proto_sims = {}
 try:
     embedding = get_embedding(model, x_in, layer_name=embed_layer if embed_layer.strip() else None)
@@ -529,7 +526,7 @@ try:
 except Exception:
     proto_sorted = []
 
-# Primary card (elite)
+# Primary detection card
 st.markdown(f"""
 <div class='hud-card' style='display:flex; justify-content:space-between; align-items:center;'>
   <div>
@@ -543,18 +540,40 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# Visuals: Plotly waveform + prob bars
+# Visuals: Try Plotly first, fallback to Matplotlib
 g1, g2 = st.columns([1.7, 1.3])
 with g1:
     st.markdown("<div class='label-small'>SIGNAL OSCILLOSCOPE</div>", unsafe_allow_html=True)
-    fig_wave = plotly_waveform(y, sr, title="Waveform", neon_color=PALETTE["neon"])
-    st.plotly_chart(fig_wave, use_container_width=True, theme="plotly_dark")
+    plotted = False
+    if PLOTLY_AVAILABLE:
+        try:
+            fig_wave = plotly_waveform(y, sr, title="Waveform", neon_color=PALETTE["neon"])
+            if fig_wave is not None:
+                st.plotly_chart(fig_wave, use_container_width=True)  # NO theme= argument
+                plotted = True
+        except Exception:
+            plotted = False
+    if not plotted:
+        # fallback to matplotlib waveform
+        fig_w = make_neon_plot_matplotlib(np.linspace(0, len(y)/sr, len(y)), y, color=PALETTE["neon"], title="Waveform")
+        st.pyplot(fig_w); plt.close(fig_w)
+
 with g2:
     st.markdown("<div class='label-small'>PROBABILITIES</div>", unsafe_allow_html=True)
-    fig_probs = plotly_prob_bars(probs, idx_to_label, top_k=8)
-    st.plotly_chart(fig_probs, use_container_width=True, theme="plotly_dark")
+    plotted = False
+    if PLOTLY_AVAILABLE:
+        try:
+            fig_p = plotly_prob_bars(probs, idx_to_label, top_k=8)
+            if fig_p is not None:
+                st.plotly_chart(fig_p, use_container_width=True)  # NO theme= argument
+                plotted = True
+        except Exception:
+            plotted = False
+    if not plotted:
+        fig_p = plot_probability_bars_matplotlib(probs, idx_to_label, top_k=8)
+        st.pyplot(fig_p); plt.close(fig_p)
 
-# Unsupervised metrics (dashboard)
+# Metrics
 st.markdown("### Unsupervised metrics (no ground-truth required)")
 c1, c2, c3 = st.columns(3)
 c1.metric("Top confidence", f"{conf_top*100:05.2f}%")
@@ -582,13 +601,11 @@ if proto_sorted:
 if is_ood:
     st.warning(f"Softmax max ({conf_top:.3f}) < OOD threshold ({ood_threshold:.3f}) — sample may be Out-Of-Distribution")
 
-# Grad-CAM (matplotlib) + MFCC heatstrip (labeled)
+# Grad-CAM (matplotlib)
 if grad_model is not None:
     try:
         cam, _ = run_gradcam(grad_model, x_in)
-        # fixed is (T, F)
-        T_frames = fixed.shape[0]; F_bins = fixed.shape[1]
-        duration_s = len(y)/sr
+        T_frames = fixed.shape[0]; F_bins = fixed.shape[1]; duration_s = len(y)/sr
         fig, (ax_mfcc, ax_cam) = plt.subplots(2, 1, figsize=(12,4), gridspec_kw={'height_ratios':[1,0.25]}, dpi=120)
         fig.patch.set_alpha(0); ax_mfcc.patch.set_alpha(0)
         im = ax_mfcc.imshow(fixed.T, origin='lower', aspect='auto', cmap=PALETTE["mfcc_cmap"])
