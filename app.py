@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
 """
 VOCAPRA Streamlit App — Full corrected single-file app (Elite Dark)
-This version includes:
+Includes:
 - Elite dark HUD CSS
 - Plotly interactive waveform & probability bars (fallback to Matplotlib)
 - Robust audio loading (soundfile / librosa)
 - MFCC + deltas feature extraction and fixed-frame input
 - Model & label map loading from vocapra_project/
 - Grad-CAM heatstrip
-- Unsupervised metrics (high-contrast HUD cards)
+- Unsupervised metrics (high-contrast HUD cards rendered via streamlit.components.v1.html)
 - Prototype embeddings (from vocapra_project/prototypes/)
 - Safe fallbacks and error handling
-Save as app.py and run: streamlit run app.py
+
+Save as app.py and run:
+    streamlit run app.py
 """
 
 from __future__ import annotations
-import json, io, math, os
+import json
+import io
+import math
+import os
 from pathlib import Path
 from typing import Optional, List, Dict
 
@@ -33,6 +38,9 @@ try:
     PLOTLY_AVAILABLE = True
 except Exception:
     PLOTLY_AVAILABLE = False
+
+# streamlit components for safe HTML embedding
+from streamlit.components.v1 import html as st_html
 
 # -----------------------
 # CONFIG
@@ -172,7 +180,8 @@ def confidence_margin(probs):
 
 def snr_estimate(signal):
     s = np.asarray(signal, dtype=np.float32)
-    if s.size == 0: return 0.0
+    if s.size == 0:
+        return 0.0
     rms = np.sqrt(np.mean(s**2))
     noise = s[np.abs(s) < np.percentile(np.abs(s), 25)]
     noise_rms = np.sqrt(np.mean(noise**2)) + 1e-12
@@ -233,30 +242,35 @@ def get_embedding(model, x_input, layer_name: Optional[str]=None):
     return None
 
 def cosine_similarity(a, b):
-    a = np.asarray(a).ravel(); b = np.asarray(b).ravel()
-    if a.size==0 or b.size==0: return 0.0
-    return float(np.dot(a, b) / ((np.linalg.norm(a)+1e-12)*(np.linalg.norm(b)+1e-12)))
+    a = np.asarray(a).ravel()
+    b = np.asarray(b).ravel()
+    if a.size == 0 or b.size == 0:
+        return 0.0
+    return float(np.dot(a, b) / ((np.linalg.norm(a) + 1e-12) * (np.linalg.norm(b) + 1e-12)))
 
 # -----------------------
 # PROTOTYPE BUILD
 # -----------------------
 @st.cache_resource(show_spinner=False)
 def build_prototypes_from_dir(protos_dir: Path, model, target_frames=TARGET_FRAMES):
-    if not protos_dir.exists(): return {}
+    if not protos_dir.exists():
+        return {}
     protos: Dict[str, np.ndarray] = {}
     for cls in sorted([d for d in protos_dir.iterdir() if d.is_dir()]):
         embs = []
         for wav in sorted(cls.glob("*.wav")):
             try:
                 data, sr = sf.read(str(wav))
-                if data.ndim==2: data = np.mean(data, axis=1)
+                if data.ndim == 2:
+                    data = np.mean(data, axis=1)
                 if sr != SR:
                     data = librosa.resample(data.astype(np.float32), orig_sr=sr, target_sr=SR)
                 feats = compute_mfcc_with_deltas(data, sr=SR)
                 fixed = to_fixed_frames(feats, target_frames)
                 x_in = np.expand_dims(fixed, axis=0).astype(np.float32)
                 emb = get_embedding(model, x_in, layer_name=None)
-                if emb is not None: embs.append(emb)
+                if emb is not None:
+                    embs.append(emb)
             except Exception:
                 continue
         if embs:
@@ -273,18 +287,19 @@ def plotly_waveform(y, sr, title="Waveform", neon_color=PALETTE["neon"]):
     max_points = 6000
     if t.size > max_points:
         idx = np.linspace(0, t.size-1, max_points).astype(int)
-        t = t[idx]; y_plot = y[idx]
+        t = t[idx]
+        y_plot = y[idx]
     else:
         y_plot = y
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=t, y=y_plot, mode='lines',
                              line=dict(color=neon_color, width=1.6),
                              hovertemplate='time: %{x:.3f}s<br>amp: %{y:.3f}<extra></extra>'))
-    for w,a in [(3,0.06),(6,0.03),(12,0.02)]:
+    for w, a in [(3, 0.06), (6, 0.03), (12, 0.02)]:
         fig.add_trace(go.Scatter(x=t, y=y_plot, mode='lines',
                                  line=dict(color=neon_color, width=w),
                                  opacity=a, hoverinfo='skip', showlegend=False))
-    fig.update_layout(margin=dict(l=6,r=6,t=28,b=6),
+    fig.update_layout(margin=dict(l=6, r=6, t=28, b=6),
                       paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
                       title=dict(text=title, font=dict(color=PALETTE["fg"], size=12)),
                       xaxis=dict(title='Time (s)', color=PALETTE["muted"]),
@@ -308,22 +323,27 @@ def plotly_prob_bars(probs, idx_to_label, top_k=8):
                            textposition='outside',
                            marker=dict(color=colors[::-1], line=dict(color='rgba(0,0,0,0.3)', width=0.6)),
                            hovertemplate='%{y}<br>Prob: %{x:.3f}<extra></extra>'))
-    fig.update_layout(margin=dict(l=6,r=6,t=6,b=6),
+    fig.update_layout(margin=dict(l=6, r=6, t=6, b=6),
                       paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                      xaxis=dict(range=[0,1], tickformat='.0%', color=PALETTE["muted"]),
+                      xaxis=dict(range=[0, 1], tickformat='.0%', color=PALETTE["muted"]),
                       yaxis=dict(autorange='reversed', color=PALETTE["fg"]))
     return fig
 
 def make_neon_plot_matplotlib(x, y, color=PALETTE["neon"], title="Waveform"):
-    fig, ax = plt.subplots(figsize=(9,2.6), dpi=100)
-    fig.patch.set_alpha(0); ax.patch.set_alpha(0)
+    fig, ax = plt.subplots(figsize=(9, 2.6), dpi=100)
+    fig.patch.set_alpha(0)
+    ax.patch.set_alpha(0)
     ax.plot(x, y, color=color, linewidth=1.6)
-    for n in range(1,5):
-        ax.plot(x, y, color=color, linewidth=1.6+n*0.6, alpha=0.12/n)
+    for n in range(1, 5):
+        ax.plot(x, y, color=color, linewidth=1.6 + n*0.6, alpha=0.12/n)
     ax.set_facecolor('none')
-    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False); ax.spines['left'].set_visible(False)
-    ax.spines['bottom'].set_color('#2b2f33'); ax.tick_params(axis='x', colors=PALETTE["muted"])
-    ax.set_yticks([]); ax.set_xlabel("Time (s)", color=PALETTE["muted"], fontsize=9)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['left'].set_visible(False)
+    ax.spines['bottom'].set_color('#2b2f33')
+    ax.tick_params(axis='x', colors=PALETTE["muted"])
+    ax.set_yticks([])
+    ax.set_xlabel("Time (s)", color=PALETTE["muted"], fontsize=9)
     ax.set_title(title, color=PALETTE["fg"], fontsize=11)
     ax.grid(axis='x', color='#111214', linestyle='--', linewidth=0.4, alpha=0.25)
     plt.tight_layout()
@@ -333,8 +353,9 @@ def plot_probability_bars_matplotlib(probs, idx_to_label, top_k=8):
     sorted_idx = np.argsort(probs)[::-1][:top_k]
     top_labels = [idx_to_label[i] for i in sorted_idx]
     top_vals = probs[sorted_idx]
-    fig, ax = plt.subplots(figsize=(5.2,3), dpi=100)
-    fig.patch.set_alpha(0); ax.patch.set_alpha(0)
+    fig, ax = plt.subplots(figsize=(5.2, 3), dpi=100)
+    fig.patch.set_alpha(0)
+    ax.patch.set_alpha(0)
     cmap = plt.get_cmap(PALETTE["bar_cmap"])
     colors = cmap(np.linspace(0.15, 0.85, len(top_vals)))
     y_pos = np.arange(len(top_vals))
@@ -342,10 +363,11 @@ def plot_probability_bars_matplotlib(probs, idx_to_label, top_k=8):
     ax.set_yticks(y_pos)
     ax.set_yticklabels([l.upper() for l in top_labels[::-1]], fontsize=9, color=PALETTE["fg"])
     ax.set_xlabel("Probability", color=PALETTE["muted"], fontsize=9)
-    ax.set_xlim(0,1.0); ax.invert_yaxis()
+    ax.set_xlim(0, 1.0)
+    ax.invert_yaxis()
     ax.xaxis.set_major_formatter(lambda x, pos: f"{x*100:.0f}%")
     ax.grid(axis='x', color='#0f1112', linestyle='--', linewidth=0.5, alpha=0.6)
-    for spine in ['top','right','left']:
+    for spine in ['top', 'right', 'left']:
         ax.spines[spine].set_visible(False)
     ax.spines['bottom'].set_color('#2b2f33')
     for bar in bars:
@@ -358,29 +380,61 @@ def plot_probability_bars_matplotlib(probs, idx_to_label, top_k=8):
     return fig
 
 # -----------------------
-# High-contrast HUD metric renderer
+# High-contrast HUD metric renderer (uses st.components.v1.html)
 # -----------------------
-def render_elite_metrics(metrics: Dict[str, str], cols: int = 3, neon=PALETTE["neon"], accent=PALETTE["accent"], muted=PALETTE["muted"], fg=PALETTE["fg"]):
+def render_elite_metrics(metrics: Dict[str, str], cols: int = 3,
+                         neon=PALETTE["neon"], accent=PALETTE["accent"],
+                         muted=PALETTE["muted"], fg=PALETTE["fg"]):
+    """
+    Render metrics dict as HTML grid using streamlit.components.v1.html.
+    metrics: ordered dict-like {label: value}
+    cols: number of columns (default 3 -> 2 rows for 6 metrics).
+    """
     items = list(metrics.items())
-    rows = []
-    for i in range(0, len(items), cols):
-        rows.append(items[i:i+cols])
-    html = "<div style='display:flex;flex-direction:column;gap:10px;'>"
+    rows = [items[i:i+cols] for i in range(0, len(items), cols)]
+
+    comp_css = f"""
+    <style>
+      .elite-row {{ display:flex; gap:12px; margin-bottom:10px; }}
+      .elite-card {{
+        flex:1;
+        background: rgba(255,255,255,0.015);
+        border:1px solid rgba(255,255,255,0.03);
+        border-radius:10px;
+        padding:12px;
+        min-height:80px;
+        display:flex;
+        flex-direction:column;
+        justify-content:center;
+        box-sizing:border-box;
+        font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
+      }}
+      .elite-label {{ font-size:0.72rem; color:{muted}; text-transform:uppercase; letter-spacing:0.12em; }}
+      .elite-value {{ font-size:1.6rem; color:{fg}; font-weight:700; font-family: Manrope, Inter, monospace; margin-top:6px; }}
+      @media (max-width:700px) {{
+        .elite-row {{ flex-direction:column; }}
+      }}
+    </style>
+    """
+
+    body = "<div>"
     for row in rows:
-        html += "<div style='display:flex;gap:12px;'>"
+        body += "<div class='elite-row'>"
         for label, value in row:
-            html += f"""
-            <div style='flex:1; background: rgba(255,255,255,0.015); border:1px solid rgba(255,255,255,0.03);
-                        border-radius:10px; padding:12px; min-height:70px; display:flex; flex-direction:column; justify-content:center;'>
-                <div style='font-size:0.72rem; color:{muted}; text-transform:uppercase; letter-spacing:0.12em; font-family:Inter,monospace;'>{label}</div>
-                <div style='font-size:1.6rem; color:{fg}; font-weight:700; font-family:Manrope, Inter, monospace; margin-top:6px;'>
-                    {value}
-                </div>
+            safe_label = str(label)
+            safe_value = str(value)
+            body += f"""
+            <div class='elite-card'>
+              <div class='elite-label'>{safe_label}</div>
+              <div class='elite-value'>{safe_value}</div>
             </div>
             """
-        html += "</div>"
-    html += "</div>"
-    st.markdown(html, unsafe_allow_html=True)
+        body += "</div>"
+    body += "</div>"
+
+    html_full = comp_css + body
+    height = max(120, 110 * len(rows))
+    st_html(html_full, height=height, scrolling=True)
 
 # -----------------------
 # CSS (elite HUD)
@@ -422,12 +476,14 @@ body, .stApp {{
 .stButton>button:hover {{ box-shadow: 0 6px 20px rgba(0,0,0,0.6), 0 0 20px rgba(0,243,255,0.05); }}
 </style>
 """
+
+# -----------------------
+# STREAMLIT UI
+# -----------------------
 st.set_page_config(page_title="VOCAPRA HUD (Corrected)", page_icon="💠", layout="wide")
 st.markdown(ELITE_CSS, unsafe_allow_html=True)
 
-# -----------------------
-# LOAD ARTIFACTS & SIDEBAR
-# -----------------------
+# Load artifacts
 idx_to_label, label_to_idx, label_json_path = load_label_map()
 model, grad_model, conv_name, model_path = load_model_and_gradcam()
 
@@ -446,7 +502,7 @@ with st.sidebar:
 if model is None or not idx_to_label:
     st.sidebar.warning("Artifacts missing in vocapra_project/ — UI will load but inference is disabled.")
 
-# Build prototypes (if available)
+# build prototypes (if available)
 prototypes = {}
 if model is not None and PROTOTYPES_DIR.exists():
     prototypes = build_prototypes_from_dir(PROTOTYPES_DIR, model, target_frames=TARGET_FRAMES)
@@ -455,7 +511,7 @@ if model is not None and PROTOTYPES_DIR.exists():
     else:
         st.sidebar.info("No prototypes found in vocapra_project/prototypes/")
 
-# Sidebar options
+# Sidebar controls
 st.sidebar.markdown("### Unsupervised options")
 enable_mc = st.sidebar.checkbox("Enable MC Dropout (uncertainty)", value=False)
 mc_runs = st.sidebar.number_input("MC runs", min_value=5, max_value=50, value=10, step=1) if enable_mc else 10
@@ -477,7 +533,8 @@ uploaded.seek(0)
 file_bytes = uploaded.read()
 try:
     data, sr_read = sf.read(io.BytesIO(file_bytes), always_2d=False)
-    if data.ndim == 2: data = np.mean(data, axis=1)
+    if data.ndim == 2:
+        data = np.mean(data, axis=1)
     if sr_read != SR:
         y = librosa.resample(data.astype(np.float32), orig_sr=sr_read, target_sr=SR)
     else:
@@ -486,19 +543,19 @@ try:
 except Exception:
     y, sr = librosa.load(io.BytesIO(file_bytes), sr=SR, mono=True)
 
-# Audio player
+# audio player
 st.audio(file_bytes, format='audio/wav')
 
-# Features & predict
+# features & model input
 feats = compute_mfcc_with_deltas(y, sr=sr)
 fixed = to_fixed_frames(feats, TARGET_FRAMES)
 x_in = np.expand_dims(fixed, axis=0).astype(np.float32)
 
 if model is None:
-    st.error("Model not found — put best_model*.h5 into vocapra_project/ and reload.")
+    st.error("Model not found — place best_model*.h5 in vocapra_project/ and reload.")
     st.stop()
 
-# Inference (channel fallback)
+# inference (with channel fallback)
 try:
     probs = model.predict(x_in, verbose=0)[0]
 except Exception:
@@ -522,7 +579,8 @@ zcr = zero_crossing_rate(y)
 is_ood = conf_top < ood_threshold
 
 # MC dropout
-mc_std = None; mc_mean_conf = None
+mc_std = None
+mc_mean_conf = None
 if enable_mc:
     try:
         mc_preds = mc_dropout_predict(model, x_in, n=mc_runs)
@@ -530,40 +588,47 @@ if enable_mc:
         mc_std = float(mc_preds.std(axis=0).mean())
         mc_mean_conf = float(np.max(mc_mean))
     except Exception:
-        mc_std = None; mc_mean_conf = None
+        mc_std = None
+        mc_mean_conf = None
 
 # augmentation consistency
 consistency = None
 if enable_aug:
     try:
-        a1 = augment_noise(y, snr_db=15); a2 = augment_pitch_shift(y, sr=sr, n_steps=1); a3 = augment_time_stretch(y, rate=0.95)
+        a1 = augment_noise(y, snr_db=15)
+        a2 = augment_pitch_shift(y, sr=sr, n_steps=1)
+        a3 = augment_time_stretch(y, rate=0.95)
         aug_preds = []
         for sig in [a1, a2, a3]:
-            f = compute_mfcc_with_deltas(sig, sr=sr); fx = to_fixed_frames(f, TARGET_FRAMES); xi = np.expand_dims(fx, axis=0).astype(np.float32)
+            f = compute_mfcc_with_deltas(sig, sr=sr)
+            fx = to_fixed_frames(f, TARGET_FRAMES)
+            xi = np.expand_dims(fx, axis=0).astype(np.float32)
             try:
                 p = model.predict(xi, verbose=0)[0]
             except Exception:
                 p = model.predict(np.expand_dims(xi, axis=-1), verbose=0)[0]
             aug_preds.append(int(np.argmax(softmax_safe(p))))
-        consistency = float(sum(1 for p in aug_preds if p == pred_idx)/len(aug_preds))
+        consistency = float(sum(1 for p in aug_preds if p == pred_idx) / len(aug_preds))
     except Exception:
         consistency = None
 
-# embedding & prototypes
-embedding = None; embedding_norm = None; proto_sims = {}
+# embedding & prototype similarity
+embedding = None
+embedding_norm = None
+proto_sims = {}
 try:
     embedding = get_embedding(model, x_in, layer_name=embed_layer if embed_layer.strip() else None)
     if embedding is not None:
         embedding_norm = float(np.linalg.norm(embedding))
         for cls, proto in prototypes.items():
             proto_sims[cls] = cosine_similarity(embedding, proto)
-        proto_sorted = sorted(proto_sims.items(), key=lambda x:-x[1]) if proto_sims else []
+        proto_sorted = sorted(proto_sims.items(), key=lambda x: -x[1]) if proto_sims else []
     else:
         proto_sorted = []
 except Exception:
     proto_sorted = []
 
-# Primary detection card
+# Primary card (elite)
 st.markdown(f"""
 <div class='hud-card' style='display:flex; justify-content:space-between; align-items:center;'>
   <div>
@@ -577,7 +642,7 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# Visuals: Try Plotly first, fallback to Matplotlib
+# Visuals: Plotly (if available) with Matplotlib fallback
 g1, g2 = st.columns([1.7, 1.3])
 with g1:
     st.markdown("<div class='label-small'>SIGNAL OSCILLOSCOPE</div>", unsafe_allow_html=True)
@@ -591,9 +656,9 @@ with g1:
         except Exception:
             plotted = False
     if not plotted:
-        # fallback to matplotlib waveform
         fig_w = make_neon_plot_matplotlib(np.linspace(0, len(y)/sr, len(y)), y, color=PALETTE["neon"], title="Waveform")
-        st.pyplot(fig_w); plt.close(fig_w)
+        st.pyplot(fig_w)
+        plt.close(fig_w)
 
 with g2:
     st.markdown("<div class='label-small'>PROBABILITIES</div>", unsafe_allow_html=True)
@@ -608,7 +673,8 @@ with g2:
             plotted = False
     if not plotted:
         fig_p = plot_probability_bars_matplotlib(probs, idx_to_label, top_k=8)
-        st.pyplot(fig_p); plt.close(fig_p)
+        st.pyplot(fig_p)
+        plt.close(fig_p)
 
 # ===== High-contrast metrics (replacement) =====
 metrics_map = {
@@ -640,26 +706,30 @@ if proto_sorted:
 if is_ood:
     st.warning(f"Softmax max ({conf_top:.3f}) < OOD threshold ({ood_threshold:.3f}) — sample may be Out-Of-Distribution")
 
-# Grad-CAM (matplotlib)
+# Grad-CAM (matplotlib) + MFCC heatstrip
 if grad_model is not None:
     try:
         cam, _ = run_gradcam(grad_model, x_in)
-        T_frames = fixed.shape[0]; F_bins = fixed.shape[1]; duration_s = len(y)/sr
-        fig, (ax_mfcc, ax_cam) = plt.subplots(2, 1, figsize=(12,4), gridspec_kw={'height_ratios':[1,0.25]}, dpi=120)
-        fig.patch.set_alpha(0); ax_mfcc.patch.set_alpha(0)
+        T_frames = fixed.shape[0]
+        F_bins = fixed.shape[1]
+        duration_s = len(y) / sr
+        fig, (ax_mfcc, ax_cam) = plt.subplots(2, 1, figsize=(12, 4), gridspec_kw={'height_ratios': [1, 0.25]}, dpi=120)
+        fig.patch.set_alpha(0)
+        ax_mfcc.patch.set_alpha(0)
         im = ax_mfcc.imshow(fixed.T, origin='lower', aspect='auto', cmap=PALETTE["mfcc_cmap"])
         ax_mfcc.set_ylabel("Feature bins", color=PALETTE["muted"], fontsize=9)
         ax_mfcc.set_xticks(np.linspace(0, T_frames-1, 5))
         ax_mfcc.set_xticklabels([f"{t:.2f}s" for t in np.linspace(0, duration_s, 5)], color=PALETTE["muted"])
         ax_mfcc.set_title("Feature map (MFCC + deltas)", color=PALETTE["fg"], fontsize=10)
-        ax_cam.imshow(np.tile(cam, (F_bins,1)), origin='lower', aspect='auto', cmap=PALETTE["cam_cmap"], alpha=0.95, extent=[0,T_frames,0,F_bins])
+        ax_cam.imshow(np.tile(cam, (F_bins, 1)), origin='lower', aspect='auto', cmap=PALETTE["cam_cmap"], alpha=0.95, extent=[0, T_frames, 0, F_bins])
         ax_cam.set_xlabel("Time (s)", color=PALETTE["muted"], fontsize=9)
         ax_cam.set_xticks(np.linspace(0, T_frames-1, 5))
         ax_cam.set_xticklabels([f"{t:.2f}s" for t in np.linspace(0, duration_s, 5)], color=PALETTE["muted"])
         ax_cam.set_yticks([])
         cbar = fig.colorbar(im, ax=[ax_mfcc, ax_cam], orientation='vertical', pad=0.02)
         cbar.set_label("Feature magnitude", color=PALETTE["muted"], fontsize=9)
-        cbar.ax.yaxis.set_tick_params(color=PALETTE["muted"]); plt.setp(plt.getp(cbar.ax.axes,'yticklabels'), color=PALETTE["muted"])
+        cbar.ax.yaxis.set_tick_params(color=PALETTE["muted"])
+        plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color=PALETTE["muted"])
         plt.tight_layout()
         st.markdown("<div class='label-small'>NEURAL ACTIVATION MAP [GRAD-CAM]</div>", unsafe_allow_html=True)
         st.pyplot(fig)
